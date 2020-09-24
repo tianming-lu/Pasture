@@ -115,15 +115,16 @@ public:
 class BaseProtocol
 {
 public:
-	BaseProtocol() { this->protolock = new std::mutex; this->protoType = SERVER_PROTOCOL; };
-	virtual ~BaseProtocol() { delete this->protolock; };
+	BaseProtocol() { this->protolock = new(std::nothrow) std::mutex; this->protoType = SERVER_PROTOCOL; };
+	virtual ~BaseProtocol() {if (this->protolock) delete this->protolock; };
 	void SetFactory(BaseFactory* pfc, PROTOCOL_TPYE prototype) { this->factory = pfc; this->protoType = prototype; };
+	void SetNoLock() { delete this->protolock; this->protolock = NULL; }
 
 public:
 	BaseFactory*	factory = NULL;
 	std::mutex*		protolock = NULL;
 	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
-	uint8_t			sockCount = 0;
+	long			sockCount = 0;
 
 public:
 	virtual void ConnectionMade(HSOCKET hsock, const char* ip, int port) = 0;

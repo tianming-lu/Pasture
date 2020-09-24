@@ -75,6 +75,15 @@ static int get_listen_sock(int port)
 	return fd;
 }
 
+static void epoll_add_accept(HSOCKET hsock, int type) 
+{
+    hsock->_epoll_type = type;
+	struct epoll_event ev;
+	ev.events = EPOLLIN | EPOLLERR | EPOLLET;
+	ev.data.ptr = hsock;
+	epoll_ctl(hsock->factory->reactor->epfd, EPOLL_CTL_ADD, hsock->fd, &ev);	
+}
+
 static void epoll_add_read(HSOCKET hsock, int type) 
 {
     hsock->_epoll_type = type;
@@ -131,16 +140,27 @@ static void do_close(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 	uint8_t left_count = 0;
 	if (hsock->_is_close == 0)
 	{
-		proto->protolock->lock();
-		left_count = proto->sockCount -= 1;
-		if (hsock->_is_close == 0)
+		if(proto->protolock)
 		{
+			proto->protolock->lock();
+			if (hsock->_is_close == 0)
+			{
+				left_count = __sync_sub_and_fetch (&proto->sockCount, 1);
+				if (hsock->_epoll_type == READ)
+    				proto->ConnectionClosed(hsock, hsock->peer_ip, hsock->peer_port);
+				else
+					proto->ConnectionFailed(hsock, hsock->peer_ip, hsock->peer_port);	
+			}
+			proto->protolock->unlock();
+		}
+		else
+		{
+			left_count = __sync_sub_and_fetch (&proto->sockCount, 1);
 			if (hsock->_epoll_type == READ)
     			proto->ConnectionClosed(hsock, hsock->peer_ip, hsock->peer_port);
 			else
 				proto->ConnectionFailed(hsock, hsock->peer_ip, hsock->peer_port);	
-		}
-    	proto->protolock->unlock();
+		}		
 	}
     
     epoll_del(hsock);
@@ -154,27 +174,23 @@ static void do_connect(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 {
 	if (hsock->_is_close == 0)
 	{
-		proto->protolock->lock();
-		if (hsock->_is_close == 0)
+		if(proto->protolock)
 		{
-			proto->ConnectionMade(hsock, hsock->peer_ip, hsock->peer_port);
+			proto->protolock->lock();
+			if (hsock->_is_close == 0)
+				proto->ConnectionMade(hsock, hsock->peer_ip, hsock->peer_port);
 			proto->protolock->unlock();
-			if (hsock->_send_buf.offset > 0)
-				epoll_mod_write(hsock, WRITE);
-			else
-				epoll_mod_read(hsock, READ);
 		}
 		else
 		{
-			proto->protolock->unlock();
-			return do_close(hsock, fc, proto);
+			proto->ConnectionMade(hsock, hsock->peer_ip, hsock->peer_port);
 		}
 	}
+
+	if (hsock->_send_buf.offset > 0)
+		epoll_mod_write(hsock, WRITE);
 	else
-	{
-		do_close(hsock, fc, proto);
-	}
-	
+		epoll_mod_read(hsock, READ);
 }
 
 static void check_connect_events(HSOCKET hsock, int events,  BaseFactory* fc, BaseProtocol* proto)
@@ -329,26 +345,28 @@ static void do_read(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 	
 	if (ret == 0 && hsock->_is_close == 0)
 	{
-		proto->protolock->lock();
-		if (hsock->_is_close == 0)
+		if(proto->protolock)
 		{
-			proto->Recved(hsock,  hsock->peer_ip, hsock->peer_port, hsock->recv_buf, hsock->_recv_buf.offset);
+			proto->protolock->lock();
+			if (hsock->_is_close == 0)
+				proto->Recved(hsock,  hsock->peer_ip, hsock->peer_port, hsock->recv_buf, hsock->_recv_buf.offset);
 			proto->protolock->unlock();
-			if (hsock->_send_buf.offset > 0)
-				epoll_mod_write(hsock, WRITE);
-			else
-				epoll_mod_read(hsock, READ);
 		}
 		else
 		{
-			proto->protolock->unlock();
-			return do_close(hsock, fc, proto);
+			proto->Recved(hsock,  hsock->peer_ip, hsock->peer_port, hsock->recv_buf, hsock->_recv_buf.offset);
 		}
 	}
 	else
 	{
 		return do_close(hsock, fc, proto);
 	}
+	
+
+	if (hsock->_send_buf.offset > 0)
+		epoll_mod_write(hsock, WRITE);
+	else
+		epoll_mod_read(hsock, READ);
 }
 
 static void check_read_write_events(HSOCKET hsock, int events,  BaseFactory* fc, BaseProtocol* proto)
@@ -388,17 +406,25 @@ static void do_accpet(HSOCKET listenhsock, BaseFactory* fc)
 		hsock->peer_port = ntohs(addr.sin_port);
 		inet_ntop(AF_INET, (void *)&addr, hsock->peer_ip, sizeof(hsock->peer_ip));
 		hsock->_user = proto;
-
-		epoll_add_read(hsock, READ);
-		proto->sockCount += 1;
+		
 		set_linger_for_fd(fd);
         fcntl(fd, F_SETFL, O_RDWR|O_NONBLOCK);
-
-        proto->protolock->lock();
-        proto->ConnectionMade(hsock, hsock->peer_ip, hsock->peer_port);
-        proto->protolock->unlock();
+		__sync_add_and_fetch(&proto->sockCount, 1);
+		if(proto->protolock)
+		{
+			proto->protolock->lock();
+        	proto->ConnectionMade(hsock, hsock->peer_ip, hsock->peer_port);
+        	proto->protolock->unlock();
+		}
+		else
+		{
+			proto->ConnectionMade(hsock, hsock->peer_ip, hsock->peer_port);
+		}
+		if (hsock->_send_buf.offset > 0)
+			epoll_add_write(hsock, WRITE);
+		else
+			epoll_add_read(hsock, READ);
 	}
-	epoll_mod_read(listenhsock, ACCEPT);
 }
 
 static void check_accpet_events(HSOCKET hsock, int events,  BaseFactory* fc)
@@ -503,7 +529,7 @@ int	FactoryRun(BaseFactory* fc)
 		hsock->fd = fc->Listenfd;
 		hsock->factory = fc;
 
-		epoll_add_read(hsock, ACCEPT);
+		epoll_add_accept(hsock, ACCEPT);
 	}
 	fc->reactor->FactoryAll.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
 	return 0;
@@ -582,7 +608,8 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 		release_hsock(hsock);
 		return NULL;
 	}
-	proto->sockCount += 1;
+	//proto->sockCount += 1;
+	__sync_add_and_fetch(&proto->sockCount, 1);
 	return hsock;
 }
 

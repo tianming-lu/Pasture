@@ -1,6 +1,4 @@
-﻿#include "pch.h"
-#include "Reactor.h"
-#include "SheepsMemory.h"
+﻿#include "Reactor.h"
 #include <Ws2tcpip.h>
 #include <map>
 
@@ -267,7 +265,8 @@ static bool AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
 		Close(IocpListenSock, IocpBuff);
 		return false;
 	}
-	proto->SetFactory(fc, SERVER_PROTOCOL);
+	if (proto->factory == NULL)
+		proto->SetFactory(fc, SERVER_PROTOCOL);
 	IocpSock->factory = fc;
 	IocpSock->_user = proto;	//用户指针
 	IocpSock->_IocpBuff = IocpBuff;
@@ -592,7 +591,7 @@ static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 
 HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE iotype)
 {
-	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL))
+	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL && proto->protolock != NULL))
 		return NULL;
 	BaseFactory* fc = proto->factory;
 	IOCP_SOCKET* IocpSock = NewIOCP_Socket();

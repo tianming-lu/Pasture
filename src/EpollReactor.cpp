@@ -399,7 +399,8 @@ static void do_accpet(HSOCKET listenhsock, BaseFactory* fc)
 		memcpy(&hsock->peer_addr, &addr, sizeof(addr));
 
         BaseProtocol* proto = fc->CreateProtocol();
-        proto->SetFactory(fc, SERVER_PROTOCOL);
+		if (proto->factory == NULL)
+			proto->SetFactory(fc, SERVER_PROTOCOL);
 
         hsock->fd = fd;
 		hsock->factory = fc;
@@ -583,7 +584,7 @@ static bool EpollConnectExTCP(BaseProtocol* proto, HSOCKET hsock)
 
 HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE type)
 {
-	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) 
+	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL && proto->protolock != NULL)) 
 		return NULL;
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 

@@ -5,8 +5,10 @@
 #define __WINDOWS__
 #endif
 
+#define API_EXPORTS
+
 #ifdef __WINDOWS__
-#if defined STRESS_EXPORTS
+#if defined API_EXPORTS
 #define Reactor_API __declspec(dllexport)
 #else
 #define Reactor_API __declspec(dllimport)

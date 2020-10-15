@@ -1,6 +1,7 @@
 ﻿#include "Reactor.h"
 #include <Ws2tcpip.h>
 #include <map>
+#include <thread>
 
 #pragma comment(lib, "Ws2_32.lib")	
 
@@ -303,7 +304,7 @@ static bool ProcessIO(IOCP_SOCKET* &IocpSock, IOCP_BUFF* &IocpBuff)
 		proto = IocpSock->_user;
 		if (IocpSock->fd != INVALID_SOCKET)
 		{
-			if (IocpSock->_iotype == UDP_CONN)
+			if (IocpSock->_iotype == UDP_CONN && IocpSock->peer_port == 0)
 			{
 				inet_ntop(AF_INET, &IocpSock->peer_addr.sin_addr, IocpSock->peer_ip, sizeof(IocpSock->peer_ip));
 				IocpSock->peer_port = ntohs(IocpSock->peer_addr.sin_port);
@@ -377,7 +378,7 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam)
 		bRet = GetQueuedCompletionStatus(reactor->ComPort, &dwIoSize, (PULONG_PTR)&IocpSock, (LPOVERLAPPED*)&IocpBuff, INFINITE);
 		if (bRet == false)
 		{
-			if (WAIT_TIMEOUT == GetLastError())
+			if (IocpBuff == NULL || WAIT_TIMEOUT == GetLastError())
 				continue;
 			Close(IocpSock, IocpBuff);
 			continue;
@@ -402,12 +403,8 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam)
 	for (int i = 0; i < reactor->CPU_COUNT*2; i++)
 	//for (unsigned int i = 0; i < 1; i++)
 	{
-		HANDLE ThreadHandle;
-		ThreadHandle = CreateThread(NULL, 0, serverWorkerThread, pParam, 0, NULL);
-		if (NULL == ThreadHandle) {
-			return -4;
-		}
-		CloseHandle(ThreadHandle);
+		std::thread th(serverWorkerThread, pParam);
+		th.detach();
 	}
 	while (reactor->Run)
 	{
@@ -452,11 +449,8 @@ int ReactorStart(Reactor* reactor)
 	}
 	closesocket(tempSock);
 
-	HANDLE ThreadHandle = CreateThread(NULL, 0, mainIOCPServer, reactor, 0, NULL);
-	if (NULL == ThreadHandle) {
-		return -4;
-	}
-	CloseHandle(ThreadHandle);
+	std::thread th(mainIOCPServer, reactor);
+	th.detach();
 	return 0;
 }
 
@@ -692,11 +686,12 @@ bool HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意�
 	return true;
 }
 
-bool HsocketClose(IOCP_SOCKET*  IocpSock)
+bool HsocketClose(IOCP_SOCKET*  &IocpSock)
 {
 	if (IocpSock == NULL ||IocpSock->fd == INVALID_SOCKET)
 		return false;
 	closesocket(IocpSock->fd);
+	IocpSock = NULL;
 	return true;
 }
 

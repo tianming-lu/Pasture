@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/sysinfo.h>
+#include <thread>
 
 #define DATA_BUFSIZE 5120
 
@@ -280,8 +281,11 @@ static int do_read_udp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 	if (n > 0)
 	{
 		hsock->_recv_buf.offset += n;
-		inet_ntop(AF_INET, &hsock->peer_addr.sin_addr, hsock->peer_ip, sizeof(hsock->peer_ip));
-		hsock->peer_port = ntohs(hsock->peer_addr.sin_port);
+		if (hsock->peer_port == 0)
+		{
+			inet_ntop(AF_INET, &hsock->peer_addr.sin_addr, hsock->peer_ip, sizeof(hsock->peer_ip));
+			hsock->peer_port = ntohs(hsock->peer_addr.sin_port);
+		}
 		return 0;
 	}
 	else
@@ -476,17 +480,11 @@ static void main_work_thread(void* args)
 {
 	Reactor* reactor = (Reactor*)args;
     int i = 0;
-   	pthread_attr_t attr;
-   	pthread_t tid;
-	pthread_attr_init(&attr);
-	int rc;
 
     for (; i < reactor->CPU_COUNT*2; i++)
 	{
-		if((rc = pthread_create(&tid, &attr, (void*(*)(void*))sub_work_thread, args)) != 0)
-		{
-			return;
-		}
+		std::thread th(sub_work_thread, args);
+		th.detach();
 	}
 	while (reactor->Run)
 	{
@@ -506,15 +504,8 @@ int ReactorStart(Reactor* reactor)
 		return -1;
 
 	reactor->CPU_COUNT = get_nprocs_conf();
-   	pthread_attr_t attr;
-   	pthread_t tid;
-	pthread_attr_init(&attr);
-	int rc;
-
-	if((rc = pthread_create(&tid, &attr, (void*(*)(void*))main_work_thread, reactor)) != 0)
-	{
-		return -1;
-	}
+	std::thread th(main_work_thread, reactor);
+	th.detach();
 	return 0;
 }
 

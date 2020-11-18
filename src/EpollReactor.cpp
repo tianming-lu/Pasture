@@ -676,12 +676,11 @@ bool HsocketSend(HSOCKET hsock, const char* data, int len)
 	return true;
 }
 
-bool HsocketClose(HSOCKET &hsock)
+bool HsocketClose(HSOCKET hsock)
 {
 	if (hsock == NULL || hsock->fd < 0) return false;
 	shutdown(hsock->fd, SHUT_RD);
 	//close(hsock->fd);  直接关闭epoll没有事件通知，所以需要shutdown
-	hsock = NULL;
 	return true;
 }
 

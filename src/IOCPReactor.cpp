@@ -479,19 +479,20 @@ void ReactorStop(Reactor* reactor)
 
 int FactoryRun(BaseFactory* fc)
 {	
-	fc->FactoryInit();
+	if (!fc->FactoryInit())
+		return -1;
 
 	if (fc->ServerPort != 0)
 	{
 		fc->Listenfd = GetListenSock(fc->ServerPort);
 		if (fc->Listenfd == SOCKET_ERROR)
-			return -1;
+			return -2;
 
 		IOCP_SOCKET* IcpSock = NewIOCP_Socket();
 		if (IcpSock == NULL)
 		{
 			closesocket(fc->Listenfd);
-			return -2;
+			return -3;
 		}
 		IcpSock->factory = fc;
 		IcpSock->fd = fc->Listenfd;
@@ -703,13 +704,11 @@ bool HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意�
 	return true;
 }
 
-bool HsocketClose(IOCP_SOCKET*  &IocpSock)
+bool HsocketClose(IOCP_SOCKET* IocpSock)
 {
 	if (IocpSock == NULL ||IocpSock->fd == INVALID_SOCKET)
 		return false;
-	shutdown(IocpSock->fd, SD_RECEIVE);
-	IocpSock = NULL;
-	//closesocket(IocpSock->fd);
+	shutdown(IocpSock->fd, SD_SEND);//SD_SEND缓冲区发送完成发送FIN
 	return true;
 }
 

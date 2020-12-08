@@ -7,10 +7,10 @@
 
 class EchoProtocol: public BaseProtocol		//继承BaseProtocol
 {
-	void ConnectionMade(HSOCKET hsock, const char* ip, int port) {};
-	void ConnectionFailed(HSOCKET, const char* ip, int port) {};
-	void ConnectionClosed(HSOCKET hsock, const char* ip, int port) {};
-	void Recved(HSOCKET hsock, const char* ip, int port, const char* data, int len) { 
+	void ConnectionMade(HSOCKET hsock) {};
+	void ConnectionFailed(HSOCKET hsock) {};
+	void ConnectionClosed(HSOCKET hsock) {};
+	void Recved(HSOCKET hsock, const char* data, int len) { 
 		HsocketSend(hsock, data, len); 
 		HsocketSkipBuf(hsock, len);
 	};

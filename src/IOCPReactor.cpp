@@ -49,7 +49,7 @@ static SOCKET GetListenSock(int port)
 {
 	SOCKET listenSock = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 
-	SOCKADDR_IN serAdd;
+	SOCKADDR_IN serAdd = {0x0};
 	serAdd.sin_addr.S_un.S_addr = htonl(INADDR_ANY);
 	serAdd.sin_family = AF_INET;
 	serAdd.sin_port = htons(port);
@@ -147,9 +147,9 @@ static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff )
 			{
 				left_count = InterlockedDecrement(&proto->sockCount);
 				if (CONNECT == IocpBuff->type)
-					proto->ConnectionFailed(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+					proto->ConnectionFailed(IocpSock);
 				else
-					proto->ConnectionClosed(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+					proto->ConnectionClosed(IocpSock);
 			}
 			CloseSocket(IocpSock);
 			proto->protolock->unlock();
@@ -158,9 +158,9 @@ static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff )
 		{
 			left_count = InterlockedDecrement(&proto->sockCount);
 			if (CONNECT == IocpBuff->type)
-				proto->ConnectionFailed(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+				proto->ConnectionFailed(IocpSock);
 			else
-				proto->ConnectionClosed(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+				proto->ConnectionClosed(IocpSock);
 			CloseSocket(IocpSock);
 		}
 	}
@@ -278,19 +278,19 @@ static void AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
 	if (proto->protolock)
 	{
 		proto->protolock->lock();
-		proto->ConnectionMade(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+		proto->ConnectionMade(IocpSock);
 		proto->protolock->unlock();
 	}
 	else
 	{
-		proto->ConnectionMade(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+		proto->ConnectionMade(IocpSock);
 	}
 
 	PostRecv(IocpSock, IocpBuff, proto);
 	PostAcceptClient(IocpListenSock->factory);
 }
 
-static void ProcessIO(IOCP_SOCKET* &IocpSock, IOCP_BUFF* &IocpBuff)
+static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 {
 	BaseProtocol* proto = NULL;
 	switch (IocpBuff->type)
@@ -309,7 +309,7 @@ static void ProcessIO(IOCP_SOCKET* &IocpSock, IOCP_BUFF* &IocpBuff)
 				proto->protolock->lock();
 				if (IocpSock->fd != INVALID_SOCKET)
 				{
-					proto->Recved(IocpSock, IocpSock->peer_ip, IocpSock->peer_port, IocpSock->recv_buf, IocpBuff->offset);
+					proto->Recved(IocpSock, IocpSock->recv_buf, IocpBuff->offset);
 					proto->protolock->unlock();
 				}
 				else
@@ -320,7 +320,7 @@ static void ProcessIO(IOCP_SOCKET* &IocpSock, IOCP_BUFF* &IocpBuff)
 			}
 			else
 			{
-				proto->Recved(IocpSock, IocpSock->peer_ip, IocpSock->peer_port, IocpSock->recv_buf, IocpBuff->offset);
+				proto->Recved(IocpSock, IocpSock->recv_buf, IocpBuff->offset);
 			}
 			PostRecv(IocpSock, IocpBuff, proto);
 		}
@@ -344,7 +344,7 @@ static void ProcessIO(IOCP_SOCKET* &IocpSock, IOCP_BUFF* &IocpBuff)
 				proto->protolock->lock();
 				if (IocpSock->fd != INVALID_SOCKET)
 				{
-					proto->ConnectionMade(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+					proto->ConnectionMade(IocpSock);
 					proto->protolock->unlock();
 				}
 				else
@@ -355,7 +355,7 @@ static void ProcessIO(IOCP_SOCKET* &IocpSock, IOCP_BUFF* &IocpBuff)
 			}
 			else
 			{
-				proto->ConnectionMade(IocpSock, IocpSock->peer_ip, IocpSock->peer_port);
+				proto->ConnectionMade(IocpSock);
 			}
 			PostRecv(IocpSock, IocpBuff, proto);
 		}
@@ -414,7 +414,7 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam)
 	//for (unsigned int i = 0; i < 1; i++)
 	{
 		HANDLE ThreadHandle;
-		ThreadHandle = CreateThread(NULL, 1024*1024*16, serverWorkerThread, pParam, 0, NULL);
+		ThreadHandle = CreateThread(NULL, 0, serverWorkerThread, pParam, 0, NULL);
 		if (NULL == ThreadHandle) {
 			return -4;
 		}
@@ -464,7 +464,7 @@ int ReactorStart(Reactor* reactor)
 	closesocket(tempSock);
 
 	HANDLE ThreadHandle;
-	ThreadHandle = CreateThread(NULL, 1024*1024*16, mainIOCPServer, reactor, 0, NULL);
+	ThreadHandle = CreateThread(NULL, 0, mainIOCPServer, reactor, 0, NULL);
 	if (NULL == ThreadHandle) {
 		return -4;
 	}

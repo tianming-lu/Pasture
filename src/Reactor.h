@@ -53,6 +53,7 @@ typedef struct _IOCP_BUFF
 	uint32_t	size;
 	BYTE		type;
 	SOCKET		fd;
+	DWORD		flags;
 }IOCP_BUFF;
 #else
 typedef struct _EPOLL_BUFF
@@ -121,6 +122,8 @@ public:
 	virtual ~BaseProtocol() {if (this->protolock) delete this->protolock; };
 	void SetFactory(BaseFactory* pfc, PROTOCOL_TPYE prototype) { this->factory = pfc; this->protoType = prototype; };
 	void SetNoLock() { delete this->protolock; this->protolock = NULL; }
+	void Lock() { if(this->protolock) this->protolock->lock(); };
+	void UnLock() { if (this->protolock) this->protolock->unlock(); };
 
 public:
 	BaseFactory*	factory = NULL;

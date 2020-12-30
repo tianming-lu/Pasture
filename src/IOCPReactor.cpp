@@ -67,8 +67,10 @@ static SOCKET GetListenSock(int port)
 	return listenSock;
 }
 
-static void PostAcceptClient(BaseFactory* fc)
+static void PostAcceptClient(IOCP_SOCKET* IocpSock)
 {
+	BaseFactory* fc = IocpSock->factory;
+
 	IOCP_BUFF* IocpBuff;
 	IocpBuff = NewIOCP_Buff();
 	if (IocpBuff == NULL)
@@ -83,6 +85,7 @@ static void PostAcceptClient(BaseFactory* fc)
 	}
 	IocpBuff->databuf.len = DATA_BUFSIZE;
 	IocpBuff->type = ACCEPT;
+	IocpBuff->hsock = IocpSock;
 
 	IocpBuff->fd = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (IocpBuff->fd == INVALID_SOCKET)
@@ -113,7 +116,7 @@ static inline void CloseSocket(IOCP_SOCKET* IocpSock)
 	SOCKET fd = InterlockedExchange(&IocpSock->fd, INVALID_SOCKET);
 	if (fd != INVALID_SOCKET && fd != NULL)
 	{
-		CancelIo((HANDLE)fd);	//取消等待执行的异步操作
+		//CancelIo((HANDLE)fd);	//取消等待执行的异步操作
 		closesocket(fd);
 	}
 }
@@ -126,7 +129,7 @@ static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff )
 		if (IocpBuff->databuf.buf)
 			pst_free(IocpBuff->databuf.buf);
 		ReleaseIOCP_Buff(IocpBuff);
-		PostAcceptClient(IocpSock->factory);
+		PostAcceptClient(IocpSock);
 		return;
 	case WRITE:
 		if (IocpBuff->databuf.buf != NULL)
@@ -149,9 +152,9 @@ static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff )
 			else
 				proto->ConnectionClosed(IocpSock);
 		}
-		CloseSocket(IocpSock);
 		proto->UnLock();
 	}
+	CloseSocket(IocpSock);
 	if (left_count == 0 && proto != NULL && proto->protoType == SERVER_PROTOCOL)
 		IocpSock->factory->DeleteProtocol(proto);
 
@@ -253,6 +256,7 @@ static void AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
 	IocpSock->factory = fc;
 	IocpSock->_user = proto;	//用户指针
 	IocpSock->_IocpBuff = IocpBuff;
+	IocpBuff->hsock = IocpSock;
 
 	int nSize = sizeof(IocpSock->peer_addr);
 	getpeername(IocpSock->fd, (SOCKADDR*)&IocpSock->peer_addr, &nSize);
@@ -267,7 +271,7 @@ static void AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
 	proto->UnLock();
 
 	PostRecv(IocpSock, IocpBuff, proto);
-	PostAcceptClient(IocpListenSock->factory);
+	PostAcceptClient(IocpListenSock);
 }
 
 static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
@@ -348,16 +352,23 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam)
 	IOCP_SOCKET* IocpSock = NULL;
 	IOCP_BUFF* IocpBuff = NULL;		//IO数据,用于发起接收重叠操作
 	bool bRet = false;
+	DWORD err = 0;
 	while (true)
 	{
 		bRet = false;
 		dwIoSize = 0;	//IO操作长度
 		IocpSock = NULL;
 		IocpBuff = NULL;
+		err = 0;
 		bRet = GetQueuedCompletionStatus(reactor->ComPort, &dwIoSize, (PULONG_PTR)&IocpSock, (LPOVERLAPPED*)&IocpBuff, INFINITE);
+		if (IocpBuff != NULL)
+			IocpSock = IocpBuff->hsock;   //强制closesocket后可能返回错误的IocpSock，从IocpBuff中获取正确的IocpSock
 		if (bRet == false)
 		{
-			if (IocpBuff == NULL || WAIT_TIMEOUT == GetLastError())
+			err = GetLastError();  //64L,121L,995L
+			/*if (ERROR_NETNAME_DELETED != err)
+				printf("error %u\t %p\t", err, IocpBuff);*/
+			if (IocpBuff == NULL || WAIT_TIMEOUT == err || ERROR_IO_PENDING == err)
 				continue;
 			Close(IocpSock, IocpBuff);
 			continue;
@@ -468,7 +479,7 @@ int FactoryRun(BaseFactory* fc)
 
 		CreateIoCompletionPort((HANDLE)fc->Listenfd, fc->reactor->ComPort, (ULONG_PTR)IcpSock, 0);
 		for (int i = 0; i < fc->reactor->CPU_COUNT; i++)
-			PostAcceptClient(fc);
+			PostAcceptClient(IcpSock);
 	}
 	
 	fc->reactor->FactoryAll.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
@@ -492,6 +503,7 @@ static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 	IocpSock->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (IocpSock->fd == INVALID_SOCKET)
 		return false;
+	IocpBuff->fd = IocpSock->fd;
 
 	sockaddr_in local_addr;
 	memset(&local_addr, 0, sizeof(sockaddr_in));
@@ -525,6 +537,7 @@ static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 	IocpSock->fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (IocpSock->fd == INVALID_SOCKET)
 		return false;
+	IocpBuff->fd = IocpSock->fd;
 
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(fc->Listenfd), sizeof(fc->Listenfd));
 
@@ -587,6 +600,7 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 		return NULL;
 	}
 	IocpBuff->type = CONNECT;
+	IocpBuff->hsock = IocpSock;
 
 	IocpSock->factory = fc;
 	IocpSock->_iotype = iotype > UDP_CONN ? 0:iotype;
@@ -672,9 +686,13 @@ bool HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意�
 
 bool HsocketClose(IOCP_SOCKET* IocpSock)
 {
-	if (IocpSock == NULL ||IocpSock->fd == INVALID_SOCKET)
+	if (IocpSock == NULL ||IocpSock->fd == INVALID_SOCKET || IocpSock->fd == NULL)
 		return false;
-	shutdown(IocpSock->fd, SD_SEND);//SD_SEND缓冲区发送完成发送FIN
+	SOCKET fd = InterlockedExchange(&IocpSock->fd, NULL);
+	if (fd != INVALID_SOCKET && fd != NULL)
+	{
+		closesocket(fd);
+	}
 	return true;
 }
 

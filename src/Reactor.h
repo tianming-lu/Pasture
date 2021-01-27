@@ -1,4 +1,17 @@
-﻿#ifndef _REACTOR_H_
+﻿/*	
+*	Copyright(c) 2019 lutianming email：641471957@qq.com
+*	Pasture is licensed under the Mulan PSL v1.
+*	You can use this software according to the terms and conditions of the Mulan PSL v1.
+*	You may obtain a copy of Mulan PSL v1 at :
+*	http://license.coscl.org.cn/MulanPSL
+*	THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR
+*	IMPLIED, INCLUDING BUT NOT LIMITED TO NON - INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR
+*	PURPOSE.
+*
+*	See the Mulan PSL v1 for more details.
+*/
+
+#ifndef _REACTOR_H_
 #define _REACTOR_H_
 
 #if !defined(__WINDOWS__) && (defined(WIN32) || defined(WIN64) || defined(_MSC_VER) || defined(_WIN32))

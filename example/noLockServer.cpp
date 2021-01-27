@@ -1,4 +1,17 @@
-﻿// 这是一个无状态服务的示例代码，避免每个连接接入和关闭，导致EchoProtocol对象频繁创建和销毁
+﻿/*	
+*	Copyright(c) 2019 lutianming email：641471957@qq.com
+*	Pasture is licensed under the Mulan PSL v1.
+*	You can use this software according to the terms and conditions of the Mulan PSL v1.
+*	You may obtain a copy of Mulan PSL v1 at :
+*	http://license.coscl.org.cn/MulanPSL
+*	THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR
+*	IMPLIED, INCLUDING BUT NOT LIMITED TO NON - INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR
+*	PURPOSE.
+*
+*	See the Mulan PSL v1 for more details.
+*/
+
+// 这是一个无状态服务的示例代码，避免每个连接接入和关闭，导致EchoProtocol对象频繁创建和销毁
 // echo_proto->SetNoLock(); 将EchoProtocol设置为无锁模式，避免多线程竞争资源，提高服务器性能
 //
 

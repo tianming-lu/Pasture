@@ -9,7 +9,7 @@ class EchoProtocol: public BaseProtocol		//继承BaseProtocol
 	void ConnectionMade(HSOCKET hsock) {};
 	void ConnectionFailed(HSOCKET hsock) {};
 	void ConnectionClosed(HSOCKET hsock) {};
-	void Recved(HSOCKET hsock, const char* data, int len) { 
+	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
 		HsocketSend(hsock, data, len); 
 		HsocketSkipBuf(hsock, len);
 	};

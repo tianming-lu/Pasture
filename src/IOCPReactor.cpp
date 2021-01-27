@@ -1,5 +1,6 @@
 ﻿#include "Reactor.h"
 #include <Ws2tcpip.h>
+#include <time.h>
 #include <map>
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -292,7 +293,7 @@ static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 			proto->Lock();
 			if (IocpSock->fd != INVALID_SOCKET)
 			{
-				proto->Recved(IocpSock, IocpSock->recv_buf, IocpBuff->offset);
+				proto->ConnectionRecved(IocpSock, IocpSock->recv_buf, IocpBuff->offset);
 				proto->UnLock();
 			}
 			else
@@ -674,6 +675,62 @@ bool HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意�
 	else
 		ret = IOCPPostSendTCPEx(IocpSock, IocpBuff);
 	
+	if (ret == false)
+	{
+		pst_free(IocpBuff->databuf.buf);
+		ReleaseIOCP_Buff(IocpBuff);
+		return false;
+	}
+	IocpSock->heartbeat = time(NULL);
+	return true;
+}
+
+IOCP_BUFF* HsocketGetBuff()
+{
+	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
+	if (IocpBuff)
+	{
+		IocpBuff->databuf.buf = (char*)pst_malloc(DATA_BUFSIZE);
+		if (IocpBuff->databuf.buf)
+			IocpBuff->size = DATA_BUFSIZE;
+	}
+	return IocpBuff;
+}
+
+bool HsocketSetBuff(IOCP_BUFF* IocpBuff, const char* data, int len)
+{
+	if (IocpBuff == NULL) return false;
+	int left = IocpBuff->size - IocpBuff->offset;
+	if (left >= len)
+	{
+		memcpy(IocpBuff->databuf.buf + IocpBuff->databuf.len, data, len);
+		IocpBuff->databuf.len += len;
+	}
+	else
+	{
+		char* new_ptr = (char*)pst_realloc(IocpBuff->databuf.buf, (size_t)IocpBuff->size + len);
+		if (new_ptr)
+		{
+			IocpBuff->databuf.buf = new_ptr;
+			memcpy(IocpBuff->databuf.buf + IocpBuff->databuf.len, data, len);
+			IocpBuff->databuf.len += len;
+		}
+	}
+	return true;
+}
+
+bool HsocketSendBuff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
+{
+	if (IocpBuff == NULL || IocpSock == NULL) return false;
+	memset(&IocpBuff->overlapped, 0, sizeof(OVERLAPPED));
+	IocpBuff->type = WRITE;
+
+	bool ret = false;
+	if (IocpSock->_iotype == UDP_CONN)
+		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff);
+	else
+		ret = IOCPPostSendTCPEx(IocpSock, IocpBuff);
+
 	if (ret == false)
 	{
 		pst_free(IocpBuff->databuf.buf);

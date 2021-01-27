@@ -5,27 +5,27 @@
 #include <iostream>
 #include "Reactor.h"
 
-class EchoProtocol: public BaseProtocol		//继承BaseProtocol
+class EchoProtocol : public BaseProtocol		//继承BaseProtocol
 {
 	void ConnectionMade(HSOCKET hsock) {};
 	void ConnectionFailed(HSOCKET hsock) {};
 	void ConnectionClosed(HSOCKET hsock) {};
-	void Recved(HSOCKET hsock, const char* data, int len) { 
-		HsocketSend(hsock, data, len); 
+	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
+		HsocketSend(hsock, data, len);
 		HsocketSkipBuf(hsock, len);
 	};
 };
 
-class EchoFactory: public BaseFactory		//继承BaseFactory
+class EchoFactory : public BaseFactory		//继承BaseFactory
 {
 public:
-	EchoProtocol* echo_proto;
+	EchoProtocol* echo_proto = NULL;
 public:
-	bool	FactoryInit() { 
+	bool	FactoryInit() {
 		echo_proto = new EchoProtocol();
 		//echo_proto->SetFactory(this, CLIENT_PROTOCOL);
 		echo_proto->SetNoLock();
-		return true; 
+		return true;
 	};
 	void	FactoryLoop() {};
 	void	FactoryClose() {};
@@ -38,8 +38,8 @@ public:
 
 int main()
 {
-    std::cout << "Hello World!\n";
-    Reactor* rct = new Reactor();
+	std::cout << "Hello World!\n";
+	Reactor* rct = new Reactor();
 	ReactorStart(rct);
 	EchoFactory* bfc = new EchoFactory();
 	bfc->Set(rct, 8000);
@@ -47,7 +47,7 @@ int main()
 	while (true)
 	{
 #ifdef __WINDOWS__
-		Sleep(10*1000);
+		Sleep(10 * 1000);
 #else
 		sleep(10)
 #endif // __WINDOWS__

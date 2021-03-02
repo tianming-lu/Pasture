@@ -426,7 +426,7 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam)
 	return 0;
 }
 
-int ReactorStart(Reactor* reactor)
+int __STDCALL ReactorStart(Reactor* reactor)
 {
 	WSADATA wsData;
 	if (0 != WSAStartup(0x0202, &wsData))
@@ -466,12 +466,12 @@ int ReactorStart(Reactor* reactor)
 	return 0;
 }
 
-void ReactorStop(Reactor* reactor)
+void __STDCALL ReactorStop(Reactor* reactor)
 {
 	reactor->Run = false;
 }
 
-int FactoryRun(BaseFactory* fc)
+int __STDCALL FactoryRun(BaseFactory* fc)
 {	
 	if (!fc->FactoryInit())
 		return -1;
@@ -500,7 +500,7 @@ int FactoryRun(BaseFactory* fc)
 	return 0;
 }
 
-int FactoryStop(BaseFactory* fc)
+int __STDCALL FactoryStop(BaseFactory* fc)
 {
 	std::map<uint16_t, BaseFactory*>::iterator iter;
 	iter = fc->reactor->FactoryAll.find(fc->ServerPort);
@@ -597,7 +597,7 @@ static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 	return true;
 }
 
-HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE iotype)
+HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE iotype)
 {
 	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL))
 		return NULL;
@@ -662,7 +662,7 @@ static bool IOCPPostSendTCPEx(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 	return true;
 }
 
-bool HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意此方法存在内存泄漏风险，如果此投递未返回时socket被关闭
+bool __STDCALL HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意此方法存在内存泄漏风险，如果此投递未返回时socket被关闭
 {
 	if (IocpSock == NULL)
 		return false;
@@ -698,7 +698,7 @@ bool HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意�
 	return true;
 }
 
-IOCP_BUFF* HsocketGetBuff()
+IOCP_BUFF* __STDCALL HsocketGetBuff()
 {
 	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
 	if (IocpBuff)
@@ -710,7 +710,7 @@ IOCP_BUFF* HsocketGetBuff()
 	return IocpBuff;
 }
 
-bool HsocketSetBuff(IOCP_BUFF* IocpBuff, const char* data, int len)
+bool __STDCALL HsocketSetBuff(IOCP_BUFF* IocpBuff, const char* data, int len)
 {
 	if (IocpBuff == NULL) return false;
 	int left = IocpBuff->size - IocpBuff->offset;
@@ -732,7 +732,7 @@ bool HsocketSetBuff(IOCP_BUFF* IocpBuff, const char* data, int len)
 	return true;
 }
 
-bool HsocketSendBuff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
+bool __STDCALL HsocketSendBuff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 {
 	if (IocpBuff == NULL || IocpSock == NULL) return false;
 	memset(&IocpBuff->overlapped, 0, sizeof(OVERLAPPED));
@@ -754,7 +754,7 @@ bool HsocketSendBuff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 	return true;
 }
 
-bool HsocketClose(IOCP_SOCKET* IocpSock)
+bool __STDCALL HsocketClose(IOCP_SOCKET* IocpSock)
 {
 	if (IocpSock == NULL ||IocpSock->fd == INVALID_SOCKET || IocpSock->fd == NULL)
 		return false;
@@ -766,7 +766,7 @@ bool HsocketClose(IOCP_SOCKET* IocpSock)
 	return true;
 }
 
-int HsocketSkipBuf(IOCP_SOCKET* IocpSock, int len)
+int __STDCALL HsocketSkipBuf(IOCP_SOCKET* IocpSock, int len)
 {
 	IocpSock->_IocpBuff->offset -= len;
 	memmove(IocpSock->recv_buf, IocpSock->recv_buf + len, IocpSock->_IocpBuff->offset);

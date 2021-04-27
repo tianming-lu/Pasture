@@ -55,7 +55,7 @@ int main()
 	Reactor* rct = new Reactor();
 	ReactorStart(rct);
 	EchoFactory* bfc = new EchoFactory();
-	bfc->Set(rct, 8000);
+	bfc->Set(rct, "0.0.0.0", 8000);
 	FactoryRun(bfc);
 	while (true)
 	{

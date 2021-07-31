@@ -64,7 +64,6 @@ static SOCKET GetListenSock(const char* addr, int port)
 	SOCKET listenSock = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 
 	SOCKADDR_IN serAdd = {0x0};
-	//serAdd.sin_addr.S_un.S_addr = inet_addr(addr);
 	inet_pton(AF_INET, addr, &serAdd.sin_addr);
 	serAdd.sin_family = AF_INET;
 	serAdd.sin_port = htons(port);
@@ -136,7 +135,7 @@ static inline void CloseSocket(IOCP_SOCKET* IocpSock)
 	}
 }
 
-static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff )
+static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int err)
 {
 	switch (IocpBuff->type)
 	{
@@ -163,9 +162,9 @@ static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff )
 		{
 			left_count = InterlockedDecrement(&proto->sockCount);
 			if (CONNECT == IocpBuff->type)
-				proto->ConnectionFailed(IocpSock);
+				proto->ConnectionFailed(IocpSock, err);
 			else
-				proto->ConnectionClosed(IocpSock);
+				proto->ConnectionClosed(IocpSock, err);
 		}
 		proto->UnLock();
 	}
@@ -217,9 +216,10 @@ static inline void PostRecvUDP(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, BaseP
 	int fromlen = sizeof(struct sockaddr);
 	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &(IocpBuff->flags), (sockaddr*)&IocpSock->peer_addr, &fromlen, &IocpBuff->overlapped, NULL))
 	{
-		if (ERROR_IO_PENDING != WSAGetLastError())
+		int err = GetLastError();
+		if (ERROR_IO_PENDING != err)
 		{
-			return Close(IocpSock, IocpBuff);
+			return Close(IocpSock, IocpBuff, err);
 		}
 	}
 }
@@ -228,9 +228,10 @@ static inline void PostRecvTCP(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, BaseP
 {
 	if (SOCKET_ERROR == WSARecv(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &(IocpBuff->flags), &IocpBuff->overlapped, NULL))
 	{
-		if (ERROR_IO_PENDING != WSAGetLastError())
+		int err = GetLastError();
+		if (ERROR_IO_PENDING != err)
 		{
-			return Close(IocpSock, IocpBuff);
+			return Close(IocpSock, IocpBuff, err);
 		}
 	}
 }
@@ -240,7 +241,7 @@ static void PostRecv(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, BaseProtocol* p
 	IocpBuff->type = READ;
 	if (ResetIocp_Buff(IocpSock, IocpBuff) == false)
 	{
-		return Close(IocpSock, IocpBuff);
+		return Close(IocpSock, IocpBuff, 14);
 	}
 
 	if (IocpSock->_iotype == UDP_CONN)
@@ -257,14 +258,14 @@ static void AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
 	IOCP_SOCKET* IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL)
 	{
-		return Close(IocpListenSock, IocpBuff);
+		return Close(IocpListenSock, IocpBuff, 14);
 	}
 	IocpSock->fd = IocpBuff->fd;
 	BaseProtocol* proto = fc->CreateProtocol();	//用户指针
 	if (proto == NULL)
 	{
 		ReleaseIOCP_Socket(IocpSock);
-		return Close(IocpListenSock, IocpBuff);
+		return Close(IocpListenSock, IocpBuff, 14);
 	}
 	if (proto->factory == NULL)
 		proto->SetFactory(fc, SERVER_PROTOCOL);
@@ -275,8 +276,6 @@ static void AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
 
 	int nSize = sizeof(IocpSock->peer_addr);
 	getpeername(IocpSock->fd, (SOCKADDR*)&IocpSock->peer_addr, &nSize);
-	inet_ntop(AF_INET, &IocpSock->peer_addr.sin_addr, IocpSock->peer_ip, sizeof(IocpSock->peer_ip));
-	IocpSock->peer_port = ntohs(IocpSock->peer_addr.sin_port);
 
 	InterlockedIncrement(&proto->sockCount);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, reactor->ComPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
@@ -298,12 +297,6 @@ static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 		proto = IocpSock->_user;
 		if (IocpSock->fd != INVALID_SOCKET)
 		{
-			if (IocpSock->_iotype == UDP_CONN && IocpSock->peer_port == 0)
-			{
-				inet_ntop(AF_INET, &IocpSock->peer_addr.sin_addr, IocpSock->peer_ip, sizeof(IocpSock->peer_ip));
-				IocpSock->peer_port = ntohs(IocpSock->peer_addr.sin_port);
-			}
-
 			proto->Lock();
 			if (IocpSock->fd != INVALID_SOCKET)
 			{
@@ -313,18 +306,18 @@ static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 			else
 			{
 				proto->UnLock();
-				return Close(IocpSock, IocpBuff);
+				return Close(IocpSock, IocpBuff, 0);
 			}
 
 			PostRecv(IocpSock, IocpBuff, proto);
 		}
 		else
 		{
-			return Close(IocpSock, IocpBuff);
+			return Close(IocpSock, IocpBuff, 0);
 		}
 		break;
 	case WRITE:
-		return Close(IocpSock, IocpBuff);
+		return Close(IocpSock, IocpBuff, 0);
 		break;
 	case ACCEPT:
 		AceeptClient(IocpSock, IocpBuff);
@@ -342,14 +335,14 @@ static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 			else
 			{
 				proto->UnLock();
-				return Close(IocpSock, IocpBuff);
+				return Close(IocpSock, IocpBuff, 0);
 			}
 
 			PostRecv(IocpSock, IocpBuff, proto);
 		}
 		else
 		{
-			return Close(IocpSock, IocpBuff);
+			return Close(IocpSock, IocpBuff, 0);
 		}
 		break;
 	default:
@@ -381,16 +374,14 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam)
 		if (bRet == false)
 		{
 			err = GetLastError();  //64L,121L,995L
-			/*if (ERROR_NETNAME_DELETED != err)
-				printf("error %u\t %p\t", err, IocpBuff);*/
 			if (IocpBuff == NULL || WAIT_TIMEOUT == err || ERROR_IO_PENDING == err)
 				continue;
-			Close(IocpSock, IocpBuff);
+			Close(IocpSock, IocpBuff, err);
 			continue;
 		}
 		else if (0 == dwIoSize && (READ == IocpBuff->type || WRITE == IocpBuff->type))
 		{
-			Close(IocpSock, IocpBuff);
+			Close(IocpSock, IocpBuff, err);
 			continue;
 		}
 		else
@@ -619,8 +610,6 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 
 	IocpSock->factory = fc;
 	IocpSock->_iotype = iotype > UDP_CONN ? 0:iotype;
-	memcpy(IocpSock->peer_ip, ip, strlen(ip));
-	IocpSock->peer_port = port;
 	IocpSock->_user = proto;
 	IocpSock->_IocpBuff = IocpBuff;
 	IocpSock->peer_addr.sin_family = AF_INET;
@@ -695,7 +684,6 @@ bool __STDCALL HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    
 		ReleaseIOCP_Buff(IocpBuff);
 		return false;
 	}
-	IocpSock->heartbeat = time(NULL);
 	return true;
 }
 
@@ -751,7 +739,6 @@ bool __STDCALL HsocketSendBuff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 		ReleaseIOCP_Buff(IocpBuff);
 		return false;
 	}
-	IocpSock->heartbeat = time(NULL);
 	return true;
 }
 
@@ -772,4 +759,13 @@ int __STDCALL HsocketSkipBuf(IOCP_SOCKET* IocpSock, int len)
 	IocpSock->_IocpBuff->offset -= len;
 	memmove(IocpSock->recv_buf, IocpSock->recv_buf + len, IocpSock->_IocpBuff->offset);
 	return IocpSock->_IocpBuff->offset;
+}
+
+void __STDCALL HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz)
+{
+	inet_ntop(AF_INET, &hsock->peer_addr.sin_addr, ip, ipsz);
+}
+int __STDCALL HsocketPeerPort(HSOCKET hsock) 
+{
+	return ntohs(hsock->peer_addr.sin_port);
 }

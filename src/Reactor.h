@@ -40,7 +40,6 @@
 #include "windows.h"
 #include <Winsock2.h>
 #include <mswsock.h>    //微软扩展的类库
-#pragma warning(disable:26812)
 #else
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -101,22 +100,18 @@ typedef struct _EPOLL_SOCKET
 	int				fd;
 #endif
 	char*			recv_buf;
-	char			peer_ip[16];
-	uint16_t		peer_port;
 	struct sockaddr_in		peer_addr;
-	time_t			heartbeat;
 	BaseFactory*	factory;
+	BaseProtocol*	_user;
 
 #ifdef __WINDOWS__
 	uint8_t			_iotype;
-	BaseProtocol*	_user;
 	IOCP_BUFF*		_IocpBuff;
 }IOCP_SOCKET, * HSOCKET;
 #else
 	uint8_t			_is_close;
 	CONN_TYPE		_conn_type;
 	uint8_t			_epoll_type;
-	BaseProtocol*	_user;
 	EPOLL_BUFF		_recv_buf;
 	char*			_sendbuff;
 	EPOLL_BUFF		_send_buf;
@@ -195,15 +190,13 @@ public:
 #else
 	std::mutex*		mutex = NULL;
 #endif // __WINDOWS__
-
-	//std::mutex*		protolock = NULL;
 	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
 	long			sockCount = 0;
 
 public:
 	virtual void ConnectionMade(HSOCKET hsock) = 0;
-	virtual void ConnectionFailed(HSOCKET hsock) = 0;
-	virtual void ConnectionClosed(HSOCKET hsock) = 0;
+	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
+	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
 	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
 };
 
@@ -247,6 +240,10 @@ extern "C"
 	Reactor_API	HNETBUFF	__STDCALL	HsocketGetBuff();
 	Reactor_API	bool	__STDCALL	HsocketSetBuff(HNETBUFF netbuff, const char* data, int len);
 	Reactor_API	bool	__STDCALL	HsocketSendBuff(HSOCKET IocpSock, HNETBUFF netbuff);
+
+	Reactor_API void	__STDCALL	HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz);
+	Reactor_API int		__STDCALL	HsocketPeerPort(HSOCKET hsock);
+
 #ifndef __WINDOWS__
 	Reactor_API	HSOCKET	__STDCALL	TimerCreate(BaseProtocol* proto, int duetime, int looptime, timer_callback callback);
 	Reactor_API void 	__STDCALL	TimerDelete(HSOCKET hsock);

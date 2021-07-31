@@ -277,11 +277,6 @@ static int do_read_udp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 	if (n > 0)
 	{
 		hsock->_recv_buf.offset += n;
-		if (hsock->peer_port == 0)
-		{
-			inet_ntop(AF_INET, &hsock->peer_addr.sin_addr, hsock->peer_ip, sizeof(hsock->peer_ip));
-			hsock->peer_port = ntohs(hsock->peer_addr.sin_port);
-		}
 		return 0;
 	}
 	else
@@ -421,8 +416,6 @@ static void do_accpet(HSOCKET listenhsock, BaseFactory* fc)
 
         hsock->fd = fd;
 		hsock->factory = fc;
-		hsock->peer_port = ntohs(addr.sin_port);
-		inet_ntop(AF_INET, (void *)&addr, hsock->peer_ip, sizeof(hsock->peer_ip));
 		hsock->_user = proto;
 		
 		set_linger_for_fd(fd);
@@ -610,8 +603,6 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 
 	hsock->factory = proto->factory;
 	hsock->_conn_type = type;
-	memcpy(hsock->peer_ip, ip, strlen(ip));
-	hsock->peer_port = port;
 	hsock->_user = proto;
 
 	bool ret = false;
@@ -780,4 +771,14 @@ int HsocketSkipBuf(HSOCKET hsock, int len)
 	hsock->_recv_buf.offset -= len;
 	memmove(hsock->recv_buf, hsock->recv_buf + len, hsock->_recv_buf.offset);
 	return hsock->_recv_buf.offset;
+}
+
+void HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz)
+{
+    inet_ntop(AF_INET, &hsock->peer_addr.sin_addr, ip, ipsz);
+}
+
+int HsocketPeerPort(HSOCKET hsock) 
+{
+    return ntohs(hsock->peer_addr.sin_port);
 }

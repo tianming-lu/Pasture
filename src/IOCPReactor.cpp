@@ -46,6 +46,15 @@ static inline IOCP_SOCKET* NewIOCP_Socket()
 
 static inline void ReleaseIOCP_Socket(IOCP_SOCKET* IocpSock)
 {
+#ifdef KCP_SUPPORT
+	if (IocpSock->_conn_type == KCP_CONN)
+	{
+		Kcp_Content* ctx = (Kcp_Content*)IocpSock->_user_data;
+		ikcp_release(ctx->kcp);
+		free(ctx->buf);
+		free(ctx);
+	}
+#endif
 	pst_free(IocpSock);
 }
 
@@ -135,6 +144,12 @@ static inline void CloseSocket(IOCP_SOCKET* IocpSock)
 	}
 }
 
+static inline void AutoProtocolFree(BaseProtocol* proto) {
+	AutoProtocol* autoproto = (AutoProtocol*)proto;
+	autofree func = autoproto->freefunc;
+	func(autoproto);
+}
+
 static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int err)
 {
 	switch (IocpBuff->type)
@@ -169,8 +184,19 @@ static void Close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int err)
 		proto->UnLock();
 	}
 	CloseSocket(IocpSock);
-	if (left_count == 0 && proto != NULL && proto->protoType == SERVER_PROTOCOL)
-		IocpSock->factory->DeleteProtocol(proto);
+	if (left_count == 0 && proto != NULL) {
+		switch (proto->protoType)
+		{
+		case SERVER_PROTOCOL:
+			IocpSock->factory->DeleteProtocol(proto);
+			break;
+		case AUTO_PROTOCOL:
+			AutoProtocolFree(proto);
+			break;
+		default:
+			break;
+		}
+	}
 
 	if (IocpSock->recv_buf)
 		pst_free(IocpSock->recv_buf);
@@ -244,9 +270,10 @@ static void PostRecv(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, BaseProtocol* p
 		return Close(IocpSock, IocpBuff, 14);
 	}
 
-	if (IocpSock->_iotype == UDP_CONN)
-		return PostRecvUDP(IocpSock, IocpBuff, proto);
-	return PostRecvTCP(IocpSock, IocpBuff, proto);
+	if (IocpSock->_conn_type == TCP_CONN)
+		return PostRecvTCP(IocpSock, IocpBuff, proto);
+	return PostRecvUDP(IocpSock, IocpBuff, proto);
+	
 }
 
 static void AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
@@ -288,12 +315,65 @@ static void AceeptClient(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff)
 	PostAcceptClient(IocpListenSock);
 }
 
+#ifdef KCP_SUPPORT
+static void Kcp_recved(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
+{
+	Kcp_Content* ctx = (Kcp_Content*)(IocpSock->_user_data);
+	ikcp_input(ctx->kcp, IocpSock->recv_buf, IocpBuff->offset);
+	HsocketSkipBuf(IocpSock, IocpBuff->offset);
+
+	BaseProtocol* proto = NULL;
+	int n = 0;
+	int left = 0;
+	while (1) {
+		left = ctx->size - ctx->offset;
+		if (left < ikcp_peeksize(ctx->kcp))
+		{
+			char* newbuf = (char*)realloc(ctx->buf, ctx->size + DATA_BUFSIZE);
+			if (!newbuf) return;
+			ctx->buf = newbuf;
+			left = ctx->size - ctx->offset;
+		}
+		n = ikcp_recv(ctx->kcp, ctx->buf, left);
+		if (n < 0) break;
+		ctx->offset += n;
+
+		proto = IocpSock->_user;
+		if (IocpSock->fd != INVALID_SOCKET)
+		{
+			proto->Lock();
+			if (IocpSock->fd != INVALID_SOCKET)
+			{
+				proto->ConnectionRecved(IocpSock, ctx->buf, ctx->offset);
+				proto->UnLock();
+			}
+			else
+			{
+				proto->UnLock();
+				return Close(IocpSock, IocpBuff, 0);
+			}
+		}
+		else
+		{
+			return Close(IocpSock, IocpBuff, 0);
+		}
+	}
+	PostRecv(IocpSock, IocpBuff, proto);
+}
+#endif
+
 static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 {
 	BaseProtocol* proto = NULL;
 	switch (IocpBuff->type)
 	{
 	case READ:
+#ifdef KCP_SUPPORT
+		if (IocpSock->_conn_type == KCP_CONN)
+		{
+			return Kcp_recved(IocpSock, IocpBuff);
+		}
+#endif
 		proto = IocpSock->_user;
 		if (IocpSock->fd != INVALID_SOCKET)
 		{
@@ -413,7 +493,7 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam)
 		{
 			iter->second->FactoryLoop();
 		}
-		Sleep(1);
+		Sleep(20);
 	}
 	return 0;
 }
@@ -589,7 +669,7 @@ static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 	return true;
 }
 
-HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE iotype)
+HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE conntype)
 {
 	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL))
 		return NULL;
@@ -609,7 +689,7 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 	IocpBuff->hsock = IocpSock;
 
 	IocpSock->factory = fc;
-	IocpSock->_iotype = iotype > UDP_CONN ? 0:iotype;
+	IocpSock->_conn_type = conntype > UDP_CONN ? TCP_CONN: conntype;
 	IocpSock->_user = proto;
 	IocpSock->_IocpBuff = IocpBuff;
 	IocpSock->peer_addr.sin_family = AF_INET;
@@ -617,7 +697,7 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 	inet_pton(AF_INET, ip, &IocpSock->peer_addr.sin_addr);
 
 	bool ret = false;
-	if (iotype == UDP_CONN)
+	if (conntype == UDP_CONN)
 		ret = IOCPConnectUDP(fc, IocpSock, IocpBuff);   //UDP连接
 	else
 		ret = IOCPConnectTCP(fc, IocpSock, IocpBuff);   //TCP连接
@@ -652,7 +732,7 @@ static bool IOCPPostSendTCPEx(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 	return true;
 }
 
-bool __STDCALL HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    //注意此方法存在内存泄漏风险，如果此投递未返回时socket被关闭
+bool __STDCALL HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len)
 {
 	if (IocpSock == NULL)
 		return false;
@@ -673,10 +753,10 @@ bool __STDCALL HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    
 	IocpBuff->type = WRITE;
 
 	bool ret = false;
-	if (IocpSock->_iotype == UDP_CONN)
-		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff);
-	else
+	if (IocpSock->_conn_type == TCP_CONN)
 		ret = IOCPPostSendTCPEx(IocpSock, IocpBuff);
+	else
+		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff);
 	
 	if (ret == false)
 	{
@@ -685,6 +765,19 @@ bool __STDCALL HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)    
 		return false;
 	}
 	return true;
+}
+
+bool __STDCALL HsocketSend(IOCP_SOCKET* IocpSock, const char* data, int len)
+{
+#ifdef KCP_SUPPORT
+	if (IocpSock->_conn_type == KCP_CONN)
+	{
+		Kcp_Content* ctx = (Kcp_Content*)IocpSock->_user_data;
+		ikcp_send(ctx->kcp, data, len);
+		return true;
+	}
+#endif
+	return HsocketSendEx(IocpSock, data, len);
 }
 
 IOCP_BUFF* __STDCALL HsocketGetBuff()
@@ -728,7 +821,7 @@ bool __STDCALL HsocketSendBuff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff)
 	IocpBuff->type = WRITE;
 
 	bool ret = false;
-	if (IocpSock->_iotype == UDP_CONN)
+	if (IocpSock->_conn_type == UDP_CONN)
 		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff);
 	else
 		ret = IOCPPostSendTCPEx(IocpSock, IocpBuff);
@@ -769,3 +862,53 @@ int __STDCALL HsocketPeerPort(HSOCKET hsock)
 {
 	return ntohs(hsock->peer_addr.sin_port);
 }
+
+#ifdef KCP_SUPPORT
+static int kcp_send_callback(const char* buf, int len, ikcpcb* kcp, void* user)
+{
+	HsocketSendEx((HSOCKET)user, buf, len);
+	return 0;
+}
+
+int __STDCALL HsocketKcpCreate(HSOCKET hsock, int conv)
+{
+	ikcpcb* kcp = ikcp_create(conv, hsock);
+	if (!kcp) return -1;
+	kcp->output = kcp_send_callback;
+	Kcp_Content* ctx = (Kcp_Content*)malloc(sizeof(Kcp_Content));
+	if (!ctx) { ikcp_release(kcp); return -1; }
+	ctx->kcp = kcp;
+	ctx->buf = (char*)malloc(sizeof(DATA_BUFSIZE));
+	if (!ctx->buf) { ikcp_release(kcp); free(ctx); return -1; }
+	ctx->size = DATA_BUFSIZE;
+	hsock->_user_data = ctx;
+	hsock->_conn_type = KCP_CONN;
+	return 0;
+}
+
+int __STDCALL HsocketKcpNodelay(HSOCKET hsock, int nodelay, int interval, int resend, int nc)
+{
+	Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
+	ikcp_nodelay(ctx->kcp, nodelay, interval, resend, nc);
+	return 0;
+}
+
+int __STDCALL HsocketKcpWndsize(HSOCKET hsock, int sndwnd, int rcvwnd)
+{
+	Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
+	ikcp_wndsize(ctx->kcp, sndwnd, rcvwnd);
+	return 0;
+}
+
+int __STDCALL HsocketKcpGetconv(HSOCKET hsock)
+{
+	Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
+	return ikcp_getconv(ctx->kcp);
+}
+
+void __STDCALL HsocketKcpEnable(HSOCKET hsock, char enable)
+{
+	Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
+	ctx->enable = enable;
+}
+#endif

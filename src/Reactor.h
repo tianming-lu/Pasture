@@ -19,6 +19,7 @@
 #endif
 
 #define API_EXPORTS
+//#define KCP_SUPPORT
 
 #ifdef __WINDOWS__
 #define __STDCALL __stdcall
@@ -35,6 +36,10 @@
 #endif // __WINDOWS__
 
 #include <map>
+#ifdef KCP_SUPPORT
+#include "ikcp.h"
+#endif
+
 #ifdef __WINDOWS__
 #define WIN32_LEAN_AND_MEAN
 #include "windows.h"
@@ -48,19 +53,39 @@
 
 enum CONN_TYPE {
 	TCP_CONN = 0,
-	UDP_CONN = 1,
-	ITMER = 2
+	UDP_CONN,
+	KCP_CONN,
+	ITMER,
+};
+
+enum SOCKET_STAT{
+	SOCKET_CONNECTING = 0,
+	SOCKET_CONNECTED,
+	SOCKET_CLOSEING,
+	SOCKET_CLOSED
 };
 
 enum PROTOCOL_TPYE {
 	CLIENT_PROTOCOL = 0,
-	SERVER_PROTOCOL = 1
+	SERVER_PROTOCOL = 1,
+	AUTO_PROTOCOL = 2
 };
 
 class BaseFactory;
 class BaseProtocol;
 
 typedef void (*timer_callback) (BaseProtocol*); 
+
+#ifdef KCP_SUPPORT
+struct Kcp_Content
+{
+	ikcpcb* kcp;
+	char*	buf;
+	int		size;
+	int		offset;
+	char	enable;
+};
+#endif
 
 #ifdef __WINDOWS__
 struct _IOCP_SOCKET;
@@ -84,8 +109,8 @@ typedef struct _IOCP_BUFF
 typedef struct _EPOLL_BUFF
 {
 	char* buff;
-	size_t offset;
-	size_t size;
+	int offset;
+	int size;
 	uint8_t lock_flag;
 }EPOLL_BUFF, * HNETBUFF;
 #endif
@@ -99,21 +124,18 @@ typedef struct _EPOLL_SOCKET
 {
 	int				fd;
 #endif
-	char*			recv_buf;
 	struct sockaddr_in		peer_addr;
-	BaseFactory*	factory;
-	BaseProtocol*	_user;
-
+	BaseFactory*			factory;
+	BaseProtocol*			_user;
+	void*					_user_data;
+	CONN_TYPE				_conn_type;
 #ifdef __WINDOWS__
-	uint8_t			_iotype;
+	char*			recv_buf;
 	IOCP_BUFF*		_IocpBuff;
 }IOCP_SOCKET, * HSOCKET;
 #else
-	uint8_t			_is_close;
-	CONN_TYPE		_conn_type;
-	uint8_t			_epoll_type;
+	uint8_t			_stat;
 	EPOLL_BUFF		_recv_buf;
-	char*			_sendbuff;
 	EPOLL_BUFF		_send_buf;
 	//timer
 	timer_callback  _callback;
@@ -134,6 +156,7 @@ public:
 	LPFN_ACCEPTEX				lpfnAcceptEx = NULL;					 //AcceptEx函数指针
 #else
 	int		epfd = 0;
+	int		epwfd = 0;
 	int 	maxevent = 1024;
 #endif
 	std::map<uint16_t, BaseFactory*>	FactoryAll;
@@ -163,7 +186,7 @@ public:
 #ifdef __WINDOWS__
 		CloseHandle(this->mutex); this->mutex = NULL;
 #else
-		if (this->mutex) delete this->mutex; this->mutex = NULL;
+		if (this->mutex) {delete this->mutex; this->mutex = NULL;}
 #endif
 	}
 	void Lock() { 
@@ -223,6 +246,23 @@ public:
 	virtual void	DeleteProtocol(BaseProtocol* proto) = 0;
 };
 
+typedef void (*autofree)(BaseProtocol* proto);
+
+class AutoProtocol :
+	public BaseProtocol
+{
+public:
+	char* buf = NULL;
+	int buflen = 0;
+	autofree freefunc = NULL;
+	AutoProtocol() {};
+	virtual ~AutoProtocol() { if (buf) free(buf); };
+	virtual void ConnectionMade(HSOCKET hsock) = 0;
+	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
+	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
+	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
+};
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -244,7 +284,18 @@ extern "C"
 	Reactor_API void	__STDCALL	HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz);
 	Reactor_API int		__STDCALL	HsocketPeerPort(HSOCKET hsock);
 
-#ifndef __WINDOWS__
+#ifdef KCP_SUPPORT
+	Reactor_API int __STDCALL HsocketKcpCreate(HSOCKET hsock, int conv);
+	Reactor_API int __STDCALL HsocketKcpNodelay(HSOCKET hsock, int nodelay, int interval, int resend, int nc);
+	Reactor_API int __STDCALL HsocketKcpWndsize(HSOCKET hsock, int sndwnd, int rcvwnd);
+	Reactor_API int __STDCALL HsocketKcpGetconv(HSOCKET hsock);
+	Reactor_API void __STDCALL HsocketKcpEnable(HSOCKET hsock, char enable);
+#endif
+
+#ifdef __WINDOWS__
+
+#else
+	Reactor_API void 	__STDCALL	HsocketClosed(HSOCKET hsock);
 	Reactor_API	HSOCKET	__STDCALL	TimerCreate(BaseProtocol* proto, int duetime, int looptime, timer_callback callback);
 	Reactor_API void 	__STDCALL	TimerDelete(HSOCKET hsock);
 #endif

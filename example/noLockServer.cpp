@@ -20,12 +20,12 @@
 
 class EchoProtocol : public BaseProtocol		//继承BaseProtocol
 {
-	void ConnectionMade(HSOCKET hsock) {};
+	void ConnectionMade(HSOCKET hsock, CONN_TYPE type) {};
 	void ConnectionFailed(HSOCKET hsock, int err) {};
 	void ConnectionClosed(HSOCKET hsock, int err) {};
 	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
 		HsocketSend(hsock, data, len);
-		HsocketSkipBuf(hsock, len);
+		HsocketPopBuf(hsock, len);
 	};
 };
 
@@ -40,6 +40,7 @@ public:
 		echo_proto->SetNoLock();
 		return true;
 	};
+	void	FactoryInited() {};
 	void	FactoryLoop() {};
 	void	FactoryClose() {};
 	BaseProtocol* CreateProtocol() {    //accept建立新连接时复用EchoProtocol对象

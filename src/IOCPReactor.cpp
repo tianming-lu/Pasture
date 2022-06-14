@@ -76,20 +76,10 @@ static inline IUINT32 iclock(){
 }
 #endif
 
-static inline void* pst_malloc(size_t size){
-	return GlobalAlloc(GPTR, size);
-}
-
-static inline void* pst_realloc(void* ptr, size_t size){
-	return GlobalReAlloc(ptr, size, GMEM_MOVEABLE);
-}
-
-static inline void pst_free(void* ptr){
-	GlobalFree(ptr);
-}
-
 static inline IOCP_SOCKET* NewIOCP_Socket(){
-	return (IOCP_SOCKET*)pst_malloc(sizeof(IOCP_SOCKET));
+	HSOCKET hsock = (HSOCKET)malloc(sizeof(IOCP_SOCKET));
+	if (hsock) {memset(hsock, 0x0, sizeof(IOCP_SOCKET));}
+	return hsock;
 }
 
 static inline void ReleaseIOCP_Socket(IOCP_SOCKET* IocpSock){
@@ -98,19 +88,21 @@ static inline void ReleaseIOCP_Socket(IOCP_SOCKET* IocpSock){
 	{
 		Kcp_Content* ctx = (Kcp_Content*)IocpSock->_user_data;
 		ikcp_release(ctx->kcp);
-		pst_free(ctx->buf);
-		pst_free(ctx);
+		free(ctx->buf);
+		free(ctx);
 	}
 #endif
-	pst_free(IocpSock);
+	free(IocpSock);
 }
 
 static inline IOCP_BUFF* NewIOCP_Buff(){
-	return (IOCP_BUFF*)pst_malloc(sizeof(IOCP_BUFF));
+	IOCP_BUFF* buff = (IOCP_BUFF*)malloc(sizeof(IOCP_BUFF));
+	if (buff) { memset(buff, 0x0, sizeof(IOCP_BUFF)); }
+	return buff;
 }
 
-static inline void ReleaseIOCP_Buff(IOCP_BUFF* IocpBuff){
-	pst_free(IocpBuff);
+static inline void ReleaseIOCP_Buff(IOCP_BUFF* buff){
+	free(buff);
 }
 
 static SOCKET GetListenSock(const char* addr, int port){
@@ -132,19 +124,20 @@ static SOCKET GetListenSock(const char* addr, int port){
 	return listenSock;
 }
 
-static void HsocketSetKeepAlive(SOCKET fd) {
+static void HsocketSetKeepAlive(SOCKET fd) {  //这个函数使用有问题，尚未验证其正确性
 	int keepalive = 1;
 	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepalive, sizeof(keepalive));
-	struct tcp_keepalive in_keep_alive;
-	unsigned long ul_in_len = sizeof(struct tcp_keepalive);
-	struct tcp_keepalive out_keep_alive = { 0 };
-	unsigned long ul_out_len = sizeof(struct tcp_keepalive);
+#define tcp_keepalive_size sizeof(struct tcp_keepalive)
+	struct tcp_keepalive in_keep_alive = { 0x0 };
 	unsigned long ul_bytes_return = 0;
 	in_keep_alive.onoff = 1; /*打开keepalive*/
-	in_keep_alive.keepaliveinterval = 5*000; /*发送keepalive心跳时间间隔-单位为毫秒*/
-	in_keep_alive.keepalivetime = 60*000; /*多长时间没有报文开始发送keepalive心跳包-单位为毫秒*/
-	WSAIoctl(fd, SIO_KEEPALIVE_VALS, (LPVOID)&in_keep_alive, ul_in_len,
-		(LPVOID)&out_keep_alive, ul_out_len, &ul_bytes_return, NULL, NULL);
+	in_keep_alive.keepaliveinterval = 1200*000*000; /*发送keepalive心跳时间间隔-单位为毫秒*/
+	in_keep_alive.keepalivetime = 1200*000*000; /*多长时间没有报文开始发送keepalive心跳包-单位为毫秒*/
+	int ret = WSAIoctl(fd, SIO_KEEPALIVE_VALS, (LPVOID)&in_keep_alive, tcp_keepalive_size,
+		NULL, 0, &ul_bytes_return, NULL, NULL);
+	if (ret == SOCKET_ERROR) {
+		printf("%s:%d %d\n", __func__, __LINE__, WSAGetLastError());
+	}
 }
 
 static void PostAcceptClient(IOCP_SOCKET* IocpSock){
@@ -155,7 +148,7 @@ static void PostAcceptClient(IOCP_SOCKET* IocpSock){
 	if (IocpBuff == NULL){
 		return;
 	}
-	IocpBuff->databuf.buf = (char*)pst_malloc(DATA_BUFSIZE);
+	IocpBuff->databuf.buf = (char*)malloc(DATA_BUFSIZE);
 	if (IocpBuff->databuf.buf == NULL){
 		ReleaseIOCP_Buff(IocpBuff);
 		return;
@@ -203,13 +196,13 @@ static void do_close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int err){
 	switch (IocpBuff->type){
 	case ACCEPT:
 		if (IocpBuff->databuf.buf)
-			pst_free(IocpBuff->databuf.buf);
+			free(IocpBuff->databuf.buf);
 		ReleaseIOCP_Buff(IocpBuff);
 		PostAcceptClient(IocpSock);
 		return;
 	case WRITE:
 		if (IocpBuff->databuf.buf != NULL)
-			pst_free(IocpBuff->databuf.buf);
+			free(IocpBuff->databuf.buf);
 		ReleaseIOCP_Buff(IocpBuff);
 		return;
 	default:
@@ -242,7 +235,7 @@ static void do_close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int err){
 		}
 	}
 	CloseSocket(IocpSock);
-	if (IocpSock->recv_buf) pst_free(IocpSock->recv_buf);
+	if (IocpSock->recv_buf) free(IocpSock->recv_buf);
 	ReleaseIOCP_Buff(IocpBuff);
 	ReleaseIOCP_Socket(IocpSock);
 }
@@ -254,7 +247,7 @@ static bool ResetIocp_Buff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 			IocpSock->recv_buf = IocpBuff->databuf.buf;
 		}
 		else{
-			IocpSock->recv_buf = (char*)pst_malloc(DATA_BUFSIZE);
+			IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
 			if (IocpSock->recv_buf == NULL) return false;
 			IocpBuff->size = DATA_BUFSIZE;
 		}
@@ -262,7 +255,7 @@ static bool ResetIocp_Buff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 	IocpBuff->databuf.len = IocpBuff->size - IocpBuff->offset;
 	if (IocpBuff->databuf.len == 0){
 		IocpBuff->size += DATA_BUFSIZE;
-		char* new_ptr = (char*)pst_realloc(IocpSock->recv_buf, IocpBuff->size);
+		char* new_ptr = (char*)realloc(IocpSock->recv_buf, IocpBuff->size);
 		if (new_ptr == NULL) return false;
 		IocpSock->recv_buf = new_ptr;
 		IocpBuff->databuf.len = IocpBuff->size - IocpBuff->offset;
@@ -315,7 +308,7 @@ static void do_aceept(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff){
 		return do_close(IocpListenSock, IocpBuff, 14);
 	}
 	IocpSock->fd = IocpBuff->fd;
-	HsocketSetKeepAlive(IocpSock->fd);
+	//HsocketSetKeepAlive(IocpSock->fd);
 
 	BaseProtocol* proto = fc->CreateProtocol();	//用户指针
 	if (proto == NULL){
@@ -355,7 +348,7 @@ static void do_read_kcp(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 		if (n < 0) {
 			if (n == -3) {
 				int newsize = ctx->size * 2;
-				char* newbuf = (char*)pst_realloc(ctx->buf, newsize);
+				char* newbuf = (char*)realloc(ctx->buf, newsize);
 				if (newbuf) {
 					ctx->buf = newbuf;
 					ctx->size = newsize;
@@ -647,7 +640,6 @@ static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 	IocpSock->fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (IocpSock->fd == INVALID_SOCKET) return false;
 	IocpBuff->fd = IocpSock->fd;
-	HsocketSetKeepAlive(IocpSock->fd);
 	struct sockaddr_in local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin_family = AF_INET;
@@ -734,7 +726,7 @@ static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len){
 	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
 	if (IocpBuff == NULL) return false;
 
-	IocpBuff->databuf.buf = (char*)pst_malloc(len);
+	IocpBuff->databuf.buf = (char*)malloc(len);
 	if (IocpBuff->databuf.buf == NULL){
 		ReleaseIOCP_Buff(IocpBuff);
 		return false;
@@ -750,7 +742,7 @@ static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len){
 	else if (IocpSock->_conn_type == UDP_CONN || IocpSock->_conn_type == KCP_CONN)
 		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr));
 	if (ret == false){
-		pst_free(IocpBuff->databuf.buf);
+		free(IocpBuff->databuf.buf);
 		ReleaseIOCP_Buff(IocpBuff);
 		return false;
 	}
@@ -791,7 +783,7 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 		IOCP_BUFF* IocpBuff = NewIOCP_Buff();
 		if (IocpBuff == NULL) return false;
 
-		IocpBuff->databuf.buf = (char*)pst_malloc(len);
+		IocpBuff->databuf.buf = (char*)malloc(len);
 		if (IocpBuff->databuf.buf == NULL) {
 			ReleaseIOCP_Buff(IocpBuff);
 			return false;
@@ -808,7 +800,7 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 
 		bool ret = IOCPPostSendUDPEx(hsock, IocpBuff, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 		if (ret == false) {
-			pst_free(IocpBuff->databuf.buf);
+			free(IocpBuff->databuf.buf);
 			ReleaseIOCP_Buff(IocpBuff);
 			return false;
 		}
@@ -820,7 +812,7 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 IOCP_BUFF* __STDCALL HsocketGetBuff(){
 	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
 	if (IocpBuff){
-		IocpBuff->databuf.buf = (char*)pst_malloc(DATA_BUFSIZE);
+		IocpBuff->databuf.buf = (char*)malloc(DATA_BUFSIZE);
 		if (IocpBuff->databuf.buf) { IocpBuff->size = DATA_BUFSIZE; }
 		else { ReleaseIOCP_Buff(IocpBuff); return NULL; }	
 	}
@@ -836,7 +828,7 @@ bool __STDCALL HsocketSetBuff(HNETBUFF netbuff, const char* data, int len){
 	}
 	else{
 		int newsize = netbuff->databuf.len + len;
-		char* new_ptr = (char*)pst_realloc(netbuff->databuf.buf, newsize);
+		char* new_ptr = (char*)realloc(netbuff->databuf.buf, newsize);
 		if (new_ptr) {
 			netbuff->databuf.buf = new_ptr;
 			netbuff->size = newsize;
@@ -858,7 +850,7 @@ bool __STDCALL HsocketSendBuff(HSOCKET hsock, HNETBUFF netbuff){
 	if (hsock->_conn_type == TCP_CONN) ret = IOCPPostSendTCPEx(hsock, netbuff);
 	else ret = IOCPPostSendUDPEx(hsock, netbuff, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 	if (ret == false){
-		pst_free(netbuff->databuf.buf);
+		free(netbuff->databuf.buf);
 		ReleaseIOCP_Buff(netbuff);
 		return false;
 	}
@@ -941,13 +933,14 @@ int __STDCALL HsocketKcpCreate(HSOCKET hsock, int conv, int mode){
 		if (!kcp) return -1;
 		kcp->output = kcp_send_callback;
 		kcp->stream = mode;
-		Kcp_Content* ctx = (Kcp_Content*)pst_malloc(sizeof(Kcp_Content));
+		Kcp_Content* ctx = (Kcp_Content*)malloc(sizeof(Kcp_Content));
 		if (!ctx) { ikcp_release(kcp); return -1; }
 		ctx->kcp = kcp;
-		ctx->buf = (char*)pst_malloc(DATA_BUFSIZE);
-		if (!ctx->buf) { ikcp_release(kcp); pst_free(ctx); return -1; }
+		ctx->buf = (char*)malloc(DATA_BUFSIZE);
+		if (!ctx->buf) { ikcp_release(kcp); free(ctx); return -1; }
 		ctx->size = DATA_BUFSIZE;
 		ctx->enable = 1;
+		ctx->lock = 0;
 		hsock->_user_data = ctx;
 		hsock->_conn_type = KCP_CONN;
 	}

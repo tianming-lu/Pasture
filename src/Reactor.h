@@ -40,6 +40,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include "windows.h"
 #include <Winsock2.h>
+#include <ws2ipdef.h>
+#include <Ws2tcpip.h>
 #include <mswsock.h>    //微软扩展的类库
 #else
 #include <sys/socket.h>
@@ -122,7 +124,7 @@ typedef struct _EPOLL_SOCKET
 {
 	int				fd;
 #endif
-	struct sockaddr_in		peer_addr;
+	struct sockaddr_in6		peer_addr;
 	BaseFactory*			factory;
 	BaseProtocol*			_user;
 	void*					_user_data;
@@ -236,7 +238,7 @@ public:
 
 public:
 	Reactor*	reactor = NULL;
-	char		ServerAddr[16] = { 0x0 };
+	char		ServerAddr[40] = { 0x0 };
 	uint16_t	ServerPort = 0;
 #ifdef __WINDOWS__
 	SOCKET		Listenfd = NULL;
@@ -292,8 +294,11 @@ extern "C"
 	Reactor_API void	__STDCALL	HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port);
 	Reactor_API void	__STDCALL	HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz);
 	Reactor_API int		__STDCALL	HsocketPeerPort(HSOCKET hsock);
+	Reactor_API void	__STDCALL	HsocketLocalIP(HSOCKET hsock, char* ip, size_t ipsz);
+	Reactor_API int		__STDCALL	HsocketLocalPort(HSOCKET hsock);
 
-	Reactor_API BaseProtocol* __STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto);
+	Reactor_API BaseProtocol*	__STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto);
+	Reactor_API int				__STDCALL	GetHostByName(const char* name, char* buf, size_t size);
 
 #ifdef KCP_SUPPORT
 	Reactor_API int		__STDCALL HsocketKcpCreate(HSOCKET hsock, int conv, int mode);

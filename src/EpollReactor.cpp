@@ -21,6 +21,7 @@
 #include <sys/sysinfo.h>
 #include <sys/timerfd.h>
 #include <sys/prctl.h>
+#include <netdb.h>
 
 #define DATA_BUFSIZE 5120
 
@@ -97,22 +98,43 @@ static void release_hsock(HSOCKET hsock){
 	}
 }
 
+static inline void socket_ip_v4_converto_v6(const char* src, char* dst, size_t size) {
+	if (strchr(src, ':')) {
+		snprintf(dst, size, src);
+	}
+	else {
+		snprintf(dst, size, "::ffff:%s", src);
+	}
+}
+
+static inline void socket_set_v6only(int fd, int v6only) {
+	setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&v6only, sizeof(v6only));
+}
+
 static int get_listen_sock(const char* ip, int port){
-	struct sockaddr_in addr;
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	//addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	inet_pton(AF_INET, ip, &addr.sin_addr);
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	int fd = socket(AF_INET6, SOCK_STREAM, 0);
 	if(fd < 0) { return -1; }
+
+	struct sockaddr_in6 server_addr = {0x0};
+	memset(&server_addr, 0, sizeof(server_addr));
+	server_addr.sin6_family = AF_INET6;
+	server_addr.sin6_port = htons(port);
+	char v6ip[40] = { 0x0 };
+	socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, v6ip, &server_addr.sin6_addr);
+	//server_addr.sin6_addr = in6addr_any;
 
 	int optval = 1;
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 	struct linger linger = {0, 0};
 	setsockopt(fd, SOL_SOCKET, SO_LINGER, (int *)&linger, sizeof(linger));
 
-	if(bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { return -1;}
-	if (listen(fd, 10)) {return -1;}
+	int ret = bind(fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+	if( ret != 0) { 
+		printf("%s:%d %s:%d %d\n", __func__, __LINE__, ip, port, ret);
+		return -2;
+	}
+	if (listen(fd, 10)) {return -3;}
 
 	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
 	fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -421,7 +443,7 @@ static void do_read(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 }
 
 static void do_accpet(HSOCKET listenhsock, BaseFactory* fc){
-    struct sockaddr_in addr;
+    struct sockaddr_in6 addr;
 	socklen_t len;
    	int fd = 0;
 
@@ -705,8 +727,11 @@ int	FactoryRun(BaseFactory* fc)
 	if (fc->ServerPort > 0)
 	{
 		fc->Listenfd = get_listen_sock(fc->ServerAddr, fc->ServerPort);
-		if (fc->Listenfd < 0)
+		if (fc->Listenfd < 0){
+			printf("%s:%d %d\n", __func__, __LINE__, fc->Listenfd);
 			return -2;
+		}
+			
 		HSOCKET hsock = new_hsockt();
 		if (hsock == NULL) {
 			close(fc->Listenfd);
@@ -736,16 +761,18 @@ int FactoryStop(BaseFactory* fc)
 
 static bool EpollConnectExUDP(BaseProtocol* proto, HSOCKET hsock, int listen_port)
 {
-	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	int fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if(fd < 0) {
 		return false;
 	}
 	hsock->fd = fd;
-	sockaddr_in local_addr;
+	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
-	local_addr.sin_family = AF_INET;
-	local_addr.sin_port = htons(listen_port);
-	
+	local_addr.sin6_family = AF_INET6;
+	local_addr.sin6_port = htons(listen_port);
+	local_addr.sin6_addr = in6addr_any;
+	socket_set_v6only(hsock->fd, 0);
+
 	if(bind(fd, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) 
     {
 		close(fd);
@@ -765,9 +792,9 @@ HSOCKET HsocketListenUDP(BaseProtocol* proto, int port)
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
 		return NULL;
-	hsock->peer_addr.sin_family = AF_INET;
-	hsock->peer_addr.sin_port = htons(port);
-	inet_pton(AF_INET, "0.0.0.0", &hsock->peer_addr.sin_addr);
+	hsock->peer_addr.sin6_family = AF_INET6;
+	hsock->peer_addr.sin6_port = htons(port);
+	inet_pton(AF_INET6, "::", &hsock->peer_addr.sin6_addr);
 
 	hsock->factory = proto->factory;
 	hsock->_conn_type = UDP_CONN;
@@ -786,7 +813,7 @@ HSOCKET HsocketListenUDP(BaseProtocol* proto, int port)
 
 static bool EpollConnectExTCP(BaseProtocol* proto, HSOCKET hsock)
 {
-	int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	int fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if(fd < 0) {
 		return false;
 	}
@@ -794,6 +821,8 @@ static bool EpollConnectExTCP(BaseProtocol* proto, HSOCKET hsock)
 	hsock->fd = fd;
 	set_linger_for_fd(fd);
 	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
+	socket_set_v6only(hsock->fd, 0);
+	
 	connect(fd, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 	hsock->_stat = SOCKET_CONNECTING;
 	epoll_add_connect(hsock);
@@ -807,9 +836,11 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
 		return NULL;
-	hsock->peer_addr.sin_family = AF_INET;
-	hsock->peer_addr.sin_port = htons(port);
-	inet_pton(AF_INET, ip, &hsock->peer_addr.sin_addr);
+	hsock->peer_addr.sin6_family = AF_INET6;
+	hsock->peer_addr.sin6_port = htons(port);
+	char v6ip[40] = { 0x0 };
+	socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, v6ip, &hsock->peer_addr.sin6_addr);
 
 	hsock->factory = proto->factory;
 	hsock->_conn_type = type;
@@ -911,10 +942,13 @@ bool HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, in
         	sbuf->size = newlen;
     	}
 		memcpy(sbuf->buff + sbuf->offset, (char*)&len, sizeof(int));
-		struct sockaddr_in* addr = (struct sockaddr_in*)sbuf->buff + sizeof(int);
-		addr->sin_family = AF_INET;
-		addr->sin_port = htons(port);
-		inet_pton(AF_INET, ip, &addr->sin_addr);
+		struct sockaddr_in6* addr = (struct sockaddr_in6*)sbuf->buff + sizeof(int);
+		addr->sin6_family = AF_INET6;
+		addr->sin6_port = htons(port);
+
+		char v6ip[40] = { 0x0 };
+		socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, v6ip, &addr->sin6_addr);
     	memcpy(sbuf->buff + sbuf->offset + sizeof(int) + sizeof(hsock->peer_addr), data, len);
     	sbuf->offset += needlen;
 		__sync_fetch_and_and(&sbuf->lock_flag, 0);
@@ -1064,19 +1098,40 @@ int HsocketPopBuf(HSOCKET hsock, int len)
 
 void HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port){
 	if (hsock->_conn_type == UDP_CONN || hsock->_conn_type == KCP_CONN) {
-		hsock->peer_addr.sin_port = htons(port);
-		inet_pton(AF_INET, ip, &hsock->peer_addr.sin_addr);
+		hsock->peer_addr.sin6_port = htons(port);
+		char v6ip[40] = { 0x0 };
+		socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, v6ip, &hsock->peer_addr.sin6_addr);
 	}
 }
 
 void HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz)
 {
-    inet_ntop(AF_INET, &hsock->peer_addr.sin_addr, ip, ipsz);
+    inet_ntop(AF_INET6, &hsock->peer_addr.sin6_addr, ip, ipsz);
+	if (strncmp(ip, "::ffff:", 7) == 0) {
+		memmove(ip, ip + 7, ipsz - 7);
+	}
 }
 
 int HsocketPeerPort(HSOCKET hsock) 
 {
-    return ntohs(hsock->peer_addr.sin_port);
+    return ntohs(hsock->peer_addr.sin6_port);
+}
+
+void __STDCALL HsocketLocalIP(HSOCKET hsock, char* ip, size_t ipsz) {
+	struct sockaddr_in6 local = { 0x0 };
+	socklen_t len = sizeof(struct sockaddr_in6);
+	getsockname(hsock->fd, (sockaddr*)&local, &len);
+	inet_ntop(AF_INET6, &local.sin6_addr, ip, ipsz);
+	if (strncmp(ip, "::ffff:", 7) == 0) {
+		memmove(ip, ip + 7, ipsz - 7);
+	}
+}
+int __STDCALL HsocketLocalPort(HSOCKET hsock) {
+	struct sockaddr_in6 local = { 0x0 };
+	socklen_t len = sizeof(struct sockaddr_in6);
+	getsockname(hsock->fd, (sockaddr*)&local, &len);
+	return ntohs(local.sin6_port);
 }
 
 BaseProtocol* __STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto) {
@@ -1085,6 +1140,16 @@ BaseProtocol* __STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto) {
 	hsock->_user = proto;
 	__sync_add_and_fetch(&proto->sockCount, 1);
 	return old;
+}
+
+int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
+	struct addrinfo* res;
+	int ret = getaddrinfo(name, NULL, NULL, &res);
+	if (ret != 0) return -1;
+	res->ai_family == AF_INET ?
+		inet_ntop(res->ai_family, &((struct sockaddr_in*)res->ai_addr)->sin_addr, buf, size) :
+		inet_ntop(res->ai_family, &((struct sockaddr_in6*)res->ai_addr)->sin6_addr, buf, size);
+	return 0;
 }
 
 #ifdef KCP_SUPPORT

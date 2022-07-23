@@ -12,7 +12,6 @@
 */
 
 #include "Reactor.h"
-#include <Ws2tcpip.h>
 #include <Mstcpip.h>
 #include <time.h>
 #include <map>
@@ -105,13 +104,31 @@ static inline void ReleaseIOCP_Buff(IOCP_BUFF* buff){
 	free(buff);
 }
 
-static SOCKET GetListenSock(const char* addr, int port){
-	SOCKET listenSock = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+static inline const char* socket_ip_v4_converto_v6(const char* src, char* dst, size_t size) {
+	if (strchr(src, ':')) {
+		return src;
+	}
+	else {
+		snprintf(dst, size, "::ffff:%s", src);
+		return dst;
+	}
+}
 
-	struct sockaddr_in server_addr = {0x0};
-	inet_pton(AF_INET, addr, &server_addr.sin_addr);
-	server_addr.sin_family = AF_INET;
-	server_addr.sin_port = htons(port);
+static inline void socket_set_v6only(SOCKET fd, int v6only) {
+	setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&v6only, sizeof(v6only));
+}
+
+static inline SOCKET get_listen_sock(const char* ip, int port){
+	SOCKET listenSock = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+
+	struct sockaddr_in6 server_addr = {0x0};
+	server_addr.sin6_family = AF_INET6;
+	server_addr.sin6_port = htons(port);
+	char v6ip[40] = { 0x0 };
+	const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, dst, &server_addr.sin6_addr);
+	//server_addr.sin6_addr = in6addr_any;
+	socket_set_v6only(listenSock, 0);
 
 	int ret = bind(listenSock, (struct sockaddr*)&server_addr, sizeof(server_addr));
 	if (ret != 0){
@@ -124,7 +141,7 @@ static SOCKET GetListenSock(const char* addr, int port){
 	return listenSock;
 }
 
-static void HsocketSetKeepAlive(SOCKET fd) {  //这个函数使用有问题，尚未验证其正确性
+static inline void hsocket_set_keepalive(SOCKET fd) {  //这个函数使用有问题，尚未验证其正确性
 	int keepalive = 1;
 	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepalive, sizeof(keepalive));
 #define tcp_keepalive_size sizeof(struct tcp_keepalive)
@@ -140,7 +157,7 @@ static void HsocketSetKeepAlive(SOCKET fd) {  //这个函数使用有问题，�
 	}
 }
 
-static void PostAcceptClient(IOCP_SOCKET* IocpSock){
+static inline void PostAcceptClient(IOCP_SOCKET* IocpSock){
 	BaseFactory* fc = IocpSock->factory;
 
 	IOCP_BUFF* IocpBuff;
@@ -157,7 +174,7 @@ static void PostAcceptClient(IOCP_SOCKET* IocpSock){
 	IocpBuff->type = ACCEPT;
 	IocpBuff->hsock = IocpSock;
 
-	IocpBuff->fd = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+	IocpBuff->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (IocpBuff->fd == INVALID_SOCKET){
 		ReleaseIOCP_Buff(IocpBuff);
 		return;
@@ -166,7 +183,7 @@ static void PostAcceptClient(IOCP_SOCKET* IocpSock){
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
 	bool rc = lpfnAcceptEx(fc->Listenfd, IocpBuff->fd,
 		IocpBuff->databuf.buf, 0,
-		sizeof(struct sockaddr_in) + 16, sizeof(struct sockaddr_in) + 16,
+		sizeof(struct sockaddr_in6) + 16, sizeof(struct sockaddr_in6) + 16,
 		&IocpBuff->databuf.len, &(IocpBuff->overlapped));
 
 	if (false == rc){
@@ -308,7 +325,7 @@ static void do_aceept(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff){
 		return do_close(IocpListenSock, IocpBuff, 14);
 	}
 	IocpSock->fd = IocpBuff->fd;
-	//HsocketSetKeepAlive(IocpSock->fd);
+	//hsocket_set_keepalive(IocpSock->fd);
 
 	BaseProtocol* proto = fc->CreateProtocol();	//用户指针
 	if (proto == NULL){
@@ -407,6 +424,7 @@ static void do_read(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 }
 
 static void do_connect(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+	//hsocket_set_keepalive(IocpSock->fd);
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);  //连接成功后刷新套接字属性
 	BaseProtocol* proto  = IocpSock->_user;
 	if (IocpSock->fd != INVALID_SOCKET) {
@@ -511,7 +529,7 @@ int __STDCALL ReactorStart(Reactor* reactor){
 	GetSystemInfo(&sysInfor);
 	reactor->CPU_COUNT = sysInfor.dwNumberOfProcessors;
 
-	SOCKET tempSock = WSASocket(AF_INET, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+	SOCKET tempSock = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	//使用WSAIoctl获取AcceptEx函数指针
 	DWORD dwbytes = 0;
 	GUID guidAcceptEx = WSAID_ACCEPTEX;
@@ -543,7 +561,7 @@ int __STDCALL FactoryRun(BaseFactory* fc){
 	if (!fc->FactoryInit()) return -1;
 
 	if (fc->ServerPort != 0){
-		fc->Listenfd = GetListenSock(fc->ServerAddr, fc->ServerPort);
+		fc->Listenfd = get_listen_sock(fc->ServerAddr, fc->ServerPort);
 		if (fc->Listenfd == SOCKET_ERROR) return -2;
 
 		IOCP_SOCKET* IcpSock = NewIOCP_Socket();
@@ -575,14 +593,16 @@ int __STDCALL FactoryStop(BaseFactory* fc){
 
 static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int listen_port)
 {
-	IocpSock->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	IocpSock->fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (IocpSock->fd == INVALID_SOCKET) return false;
 	IocpBuff->fd = IocpSock->fd;
 
-	struct sockaddr_in local_addr;
+	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
-	local_addr.sin_family = AF_INET;
-	local_addr.sin_port = ntohs(listen_port);
+	local_addr.sin6_family = AF_INET6;
+	local_addr.sin6_port = ntohs(listen_port);
+	local_addr.sin6_addr = in6addr_any;
+	socket_set_v6only(IocpSock->fd, 0);
 	bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr));
 
 	if (ResetIocp_Buff(IocpSock, IocpBuff) == false){
@@ -621,9 +641,9 @@ HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
 	IocpSock->_conn_type = UDP_CONN;
 	IocpSock->_user = proto;
 	IocpSock->_IocpBuff = IocpBuff;
-	IocpSock->peer_addr.sin_family = AF_INET;
-	IocpSock->peer_addr.sin_port = htons(0);
-	inet_pton(AF_INET, "0.0.0.0", &IocpSock->peer_addr.sin_addr);
+	IocpSock->peer_addr.sin6_family = AF_INET6;
+	IocpSock->peer_addr.sin6_port = htons(0);
+	inet_pton(AF_INET6, "::", &IocpSock->peer_addr.sin6_addr);
 
 	bool ret = false;
 	ret = IOCPConnectUDP(fc, IocpSock, IocpBuff, port);   //UDP连接
@@ -637,12 +657,13 @@ HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
 }
 
 static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
-	IocpSock->fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	IocpSock->fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if (IocpSock->fd == INVALID_SOCKET) return false;
 	IocpBuff->fd = IocpSock->fd;
-	struct sockaddr_in local_addr;
+	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
-	local_addr.sin_family = AF_INET;
+	local_addr.sin6_family = AF_INET6;
+	socket_set_v6only(IocpSock->fd, 0);
 	bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr));
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, fc->reactor->ComPort, (ULONG_PTR)IocpSock, 0);
 
@@ -683,9 +704,12 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 	IocpSock->_conn_type = conntype > ITMER ? TCP_CONN: conntype;
 	IocpSock->_user = proto;
 	IocpSock->_IocpBuff = IocpBuff;
-	IocpSock->peer_addr.sin_family = AF_INET;
-	IocpSock->peer_addr.sin_port = htons(port);
-	inet_pton(AF_INET, ip, &IocpSock->peer_addr.sin_addr);
+	IocpSock->peer_addr.sin6_family = AF_INET6;
+	IocpSock->peer_addr.sin6_port = htons(port);
+
+	char v6ip[40] = { 0x0 };
+	const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, dst, &IocpSock->peer_addr.sin6_addr);
 
 	bool ret = false;
 	if (conntype == TCP_CONN || conntype == SSL_CONN)
@@ -793,10 +817,10 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 		memset(&IocpBuff->overlapped, 0, sizeof(OVERLAPPED));
 		IocpBuff->type = WRITE;
 		
-		struct sockaddr_in toaddr = { 0x0 };
-		toaddr.sin_family = AF_INET;
-		toaddr.sin_port = htons(port);
-		inet_pton(AF_INET, ip, &toaddr.sin_addr);
+		struct sockaddr_in6 toaddr = { 0x0 };
+		toaddr.sin6_family = AF_INET6;
+		toaddr.sin6_port = htons(port);
+		inet_pton(AF_INET6, ip, &toaddr.sin6_addr);
 
 		bool ret = IOCPPostSendUDPEx(hsock, IocpBuff, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 		if (ret == false) {
@@ -901,16 +925,37 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 
 void __STDCALL HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port) {
 	if (hsock->_conn_type == UDP_CONN || hsock->_conn_type == KCP_CONN) {
-		hsock->peer_addr.sin_port = htons(port);
-		inet_pton(AF_INET, ip, &hsock->peer_addr.sin_addr);
+		hsock->peer_addr.sin6_port = htons(port);
+		char v6ip[40] = { 0x0 };
+		const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, dst, &hsock->peer_addr.sin6_addr);
 	}
 }
 
 void __STDCALL HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz){
-	inet_ntop(AF_INET, &hsock->peer_addr.sin_addr, ip, ipsz);
+	inet_ntop(AF_INET6, &hsock->peer_addr.sin6_addr, ip, ipsz);
+	if (strncmp(ip, "::ffff:", 7) == 0) {
+		memmove(ip, ip + 7, ipsz - 7);
+	}
 }
 int __STDCALL HsocketPeerPort(HSOCKET hsock) {
-	return ntohs(hsock->peer_addr.sin_port);
+	return ntohs(hsock->peer_addr.sin6_port);
+}
+
+void __STDCALL HsocketLocalIP(HSOCKET hsock, char* ip, size_t ipsz) {
+	struct sockaddr_in6 local = { 0x0 };
+	int len = sizeof(struct sockaddr_in6);
+	getsockname(hsock->fd, (sockaddr*)&local, &len);
+	inet_ntop(AF_INET6, &local.sin6_addr, ip, ipsz);
+	if (strncmp(ip, "::ffff:", 7) == 0) {
+		memmove(ip, ip + 7, ipsz - 7);
+	}
+}
+int __STDCALL HsocketLocalPort(HSOCKET hsock) {
+	struct sockaddr_in6 local = { 0x0 };
+	int len = sizeof(struct sockaddr_in6);
+	getsockname(hsock->fd, (sockaddr*)&local, &len);
+	return ntohs(local.sin6_port);
 }
 
 BaseProtocol* __STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto) {
@@ -919,6 +964,16 @@ BaseProtocol* __STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto) {
 	hsock->_user = proto;
 	InterlockedIncrement(&proto->sockCount);
 	return old;
+}
+
+int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
+	struct addrinfo* res;
+	int ret = getaddrinfo(name, NULL, NULL, &res);
+	if (ret != 0) return -1;
+	res->ai_family == AF_INET ?
+		inet_ntop(res->ai_family, &((struct sockaddr_in*)res->ai_addr)->sin_addr, buf, size) :
+		inet_ntop(res->ai_family, &((struct sockaddr_in6*)res->ai_addr)->sin6_addr, buf, size);
+	return 0;
 }
 
 #ifdef KCP_SUPPORT

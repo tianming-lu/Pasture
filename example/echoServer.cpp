@@ -51,7 +51,8 @@ int main()
     Reactor* rct = new Reactor();
 	ReactorStart(rct);
 	EchoFactory* bfc = new EchoFactory();
-	bfc->Set(rct, "0.0.0.0", 8000);
+	//bfc->Set(rct, "0.0.0.1", 8000);  //仅ipv4
+	bfc->Set(rct, "::", 8000);		//ipv4、ipv6双协议栈
 	FactoryRun(bfc);
 	while (true)
 	{

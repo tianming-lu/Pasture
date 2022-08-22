@@ -19,6 +19,10 @@
 #endif
 
 #define API_EXPORTS
+//#define OPENSSL_SUPPORT
+#define OPENSSL_SERVER 0
+#define OPENSSL_CLIENT 1
+
 //#define KCP_SUPPORT
 
 #ifdef __WINDOWS__
@@ -85,13 +89,13 @@ enum PROTOCOL_TPYE:char {
 class BaseFactory;
 class BaseProtocol;
 
-typedef void (*timer_callback) (BaseProtocol*); 
-
 #ifdef __WINDOWS__
-struct _IOCP_SOCKET;
+typedef struct _IOCP_SOCKET* HSOCKET;
 #else
-struct _EPOLL_SOCKET;
+typedef struct _EPOLL_SOCKET* HSOCKET;
 #endif
+
+typedef void (*Timer_Callback) (HSOCKET, BaseProtocol*);
 
 #ifdef __WINDOWS__
 typedef struct _IOCP_BUFF
@@ -138,7 +142,7 @@ typedef struct _EPOLL_SOCKET
 	EPOLL_BUFF		_recv_buf;
 	EPOLL_BUFF		_send_buf;
 	//timer
-	timer_callback  _callback;
+	Timer_Callback  _callback;
 }EPOLL_SOCKET, * HSOCKET;
 #endif // __WINDOWS__
 
@@ -297,8 +301,15 @@ extern "C"
 	Reactor_API void	__STDCALL	HsocketLocalIP(HSOCKET hsock, char* ip, size_t ipsz);
 	Reactor_API int		__STDCALL	HsocketLocalPort(HSOCKET hsock);
 
+	Reactor_API	HSOCKET	__STDCALL	TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback);
+	Reactor_API void 	__STDCALL	TimerDelete(HSOCKET hsock);
+
 	Reactor_API BaseProtocol*	__STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto);
 	Reactor_API int				__STDCALL	GetHostByName(const char* name, char* buf, size_t size);
+
+#ifdef OPENSSL_SUPPORT
+	Reactor_API bool __STDCALL HsocketUptoSSL(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key);
+#endif
 
 #ifdef KCP_SUPPORT
 	Reactor_API int		__STDCALL HsocketKcpCreate(HSOCKET hsock, int conv, int mode);
@@ -308,13 +319,6 @@ extern "C"
 	Reactor_API void	__STDCALL HsocketKcpEnable(HSOCKET hsock, char enable);
 	Reactor_API void	__STDCALL HsocketKcpUpdate(HSOCKET hsock);
 	Reactor_API int		__STDCALL HsocketKcpDebug(HSOCKET hsock, char* buf, int size);
-#endif
-
-#ifdef __WINDOWS__
-
-#else
-	Reactor_API	HSOCKET	__STDCALL	TimerCreate(BaseProtocol* proto, int duetime, int looptime, timer_callback callback);
-	Reactor_API void 	__STDCALL	TimerDelete(HSOCKET hsock);
 #endif
 
 #ifdef __cplusplus

@@ -17,6 +17,10 @@
 #include <map>
 
 #pragma comment(lib, "Ws2_32.lib")
+#ifdef OPENSSL_SUPPORT
+#pragma comment(lib, "libcrypto.lib")
+#pragma comment(lib, "libssl.lib")
+#endif
 
 #define DATA_BUFSIZE 8192
 #define READ	0
@@ -27,7 +31,33 @@
 static LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 static LPFN_CONNECTEX lpfnConnectEx = NULL;
 
+typedef struct {
+	HANDLE timer;
+	Timer_Callback call;
+	long lock;
+}IOCP_TIMER, * HTIMER;
+
 static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len);
+
+#ifdef OPENSSL_SUPPORT
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/bio.h>
+
+struct SSL_Content {
+	SSL_CTX* ctx;
+	SSL* ssl;
+	BIO* rbio;
+	BIO* wbio;
+
+	char*	rbuf;
+	int		rsize;
+	int		roffset;
+	char*	wbuf;
+	int		wsize;
+	int		woffset;
+};
+#endif
 
 #ifdef KCP_SUPPORT
 #include "ikcp.h"
@@ -82,6 +112,18 @@ static inline IOCP_SOCKET* NewIOCP_Socket(){
 }
 
 static inline void ReleaseIOCP_Socket(IOCP_SOCKET* IocpSock){
+#ifdef OPENSSL_SUPPORT
+	if (IocpSock->_conn_type == SSL_CONN){
+		struct SSL_Content* ssl_ctx = (struct SSL_Content*)IocpSock->_user_data;
+		//BIO_free(ssl_ctx->rbio);  //貌似bio会随着SSL_free一起释放，先行释放会引起崩溃，待后续确认
+		//BIO_free(ssl_ctx->wbio);
+		if (ssl_ctx->wbuf) free(ssl_ctx->wbuf);
+		if (ssl_ctx->rbuf) free(ssl_ctx->rbuf);
+		if (ssl_ctx->ssl) { SSL_shutdown(ssl_ctx->ssl); SSL_free(ssl_ctx->ssl); }
+		if (ssl_ctx->ctx) SSL_CTX_free(ssl_ctx->ctx);
+		free(ssl_ctx);
+	}
+#endif
 #ifdef KCP_SUPPORT
 	if (IocpSock->_conn_type == KCP_CONN)
 	{
@@ -394,6 +436,110 @@ static void do_read_kcp(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 }
 #endif
 
+#ifdef OPENSSL_SUPPORT
+static void ssl_do_write(struct SSL_Content* ssl_ctx, IOCP_SOCKET* IocpSock) {
+	while (1) {
+		int left = ssl_ctx->wsize - ssl_ctx->woffset;
+		if (left == 0) {
+			int newsize = ssl_ctx->wsize * 2;
+			char* newbuf = (char*)realloc(ssl_ctx->wbuf, newsize);
+			if (newbuf) {
+				ssl_ctx->wbuf = newbuf;
+				ssl_ctx->wsize = newsize;
+				left = ssl_ctx->wsize - ssl_ctx->woffset;
+			}
+		}
+		int r_len = BIO_read(ssl_ctx->wbio, ssl_ctx->wbuf + ssl_ctx->woffset, left);
+		if (r_len > 0)  ssl_ctx->woffset += r_len; else break;
+	}
+	HsocketSendEx(IocpSock, ssl_ctx->wbuf, ssl_ctx->woffset);
+	ssl_ctx->woffset = 0;
+}
+
+static void ssl_do_handshake(struct SSL_Content* ssl_ctx, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+	BIO_write(ssl_ctx->rbio, IocpSock->recv_buf, IocpBuff->offset);
+	IocpBuff->offset = 0;
+	int r = SSL_do_handshake(ssl_ctx->ssl);
+	ssl_do_write(ssl_ctx, IocpSock);
+	
+	BaseProtocol* proto = IocpSock->_user;
+	if (r == 1) {
+		if (IocpSock->fd != INVALID_SOCKET) {
+			proto->Lock();
+			if (IocpSock->fd != INVALID_SOCKET) {
+				proto->ConnectionMade(IocpSock, IocpSock->_conn_type);
+				proto->UnLock();
+				PostRecv(IocpSock, IocpBuff);
+				return;
+			}
+			proto->UnLock();
+		}
+		do_close(IocpSock, IocpBuff, 0);
+		return;
+	}
+	else {
+		int err_SSL_get_error = SSL_get_error(ssl_ctx->ssl, r);
+		switch (err_SSL_get_error) {
+		case SSL_ERROR_WANT_WRITE:
+		case SSL_ERROR_WANT_READ:
+			PostRecv(IocpSock, IocpBuff);
+			return;
+		default:
+			do_close(IocpSock, IocpBuff, err_SSL_get_error);
+			return;
+		}
+	}
+}
+
+static void do_read_ssl(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+	struct SSL_Content* ssl_ctx = (struct SSL_Content*)IocpSock->_user_data;
+	if (SSL_is_init_finished(ssl_ctx->ssl)) {
+		BIO_write(ssl_ctx->rbio, IocpSock->recv_buf, IocpBuff->offset);
+		IocpBuff->offset = 0;
+		while (1) {
+			char* buf = ssl_ctx->rbuf + ssl_ctx->roffset;
+			int left = ssl_ctx->rsize - ssl_ctx->roffset;
+			if (left == 0) {
+				int new_size = ssl_ctx->rsize * 2;
+				buf = (char*)realloc(ssl_ctx->rbuf, new_size);
+				if (buf) {
+					ssl_ctx->rbuf = buf;
+					ssl_ctx->rsize = new_size;
+					buf = buf + ssl_ctx->roffset;
+					left = new_size - ssl_ctx->roffset;
+				}
+			}
+			int rlen = SSL_read(ssl_ctx->ssl, ssl_ctx->rbuf + ssl_ctx->roffset, ssl_ctx->rsize - ssl_ctx->roffset);
+			if (rlen > 0) {
+				ssl_ctx->roffset += rlen;
+				continue;
+			}
+			break;
+		}
+		BaseProtocol* proto = IocpSock->_user;
+		if (ssl_ctx->roffset > 0) {
+			if (IocpSock->fd != INVALID_SOCKET) {
+				proto->Lock();
+				if (IocpSock->fd != INVALID_SOCKET) {
+					proto->ConnectionRecved(IocpSock, ssl_ctx->rbuf, ssl_ctx->roffset);
+					proto->UnLock();
+					PostRecv(IocpSock, IocpBuff);
+					return;
+				}
+				proto->UnLock();
+			}
+			do_close(IocpSock, IocpBuff, 0);
+		}
+		else {
+			PostRecv(IocpSock, IocpBuff);
+		}
+	}
+	else {
+		ssl_do_handshake(ssl_ctx, IocpSock, IocpBuff);
+	}
+}
+#endif
+
 static void do_read_tcp_and_udp(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 	BaseProtocol* proto = IocpSock->_user;
 	if (IocpSock->fd != INVALID_SOCKET) {
@@ -414,6 +560,10 @@ static void do_read(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 	case TCP_CONN:
 	case UDP_CONN:
 		return do_read_tcp_and_udp(IocpSock, IocpBuff);
+#ifdef OPENSSL_SUPPORT
+	case SSL_CONN:
+		return do_read_ssl(IocpSock, IocpBuff);
+#endif
 #ifdef KCP_SUPPORT
 	case KCP_CONN:
 		return do_read_kcp(IocpSock, IocpBuff);
@@ -423,9 +573,76 @@ static void do_read(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 	}
 }
 
+#ifdef OPENSSL_SUPPORT
+static bool Hsocket_SSL_init(IOCP_SOCKET* IocpSock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key) {
+	struct SSL_Content* ssl_ctx = (SSL_Content*)malloc(sizeof(struct SSL_Content));
+	if (!ssl_ctx) return false;
+	memset(ssl_ctx, 0x0, sizeof(SSL_Content));
+	if (openssl_type == OPENSSL_CLIENT) ssl_ctx->ctx = SSL_CTX_new(SSLv23_client_method());
+	else ssl_ctx->ctx = SSL_CTX_new(SSLv23_server_method());
+	if (!ssl_ctx->ctx) { free(ssl_ctx); return false; }
+
+	if (openssl_type == OPENSSL_SERVER) {
+		SSL_CTX_set_verify( ssl_ctx->ctx,SSL_VERIFY_NONE, NULL);
+
+		BIO* cbio = BIO_new_mem_buf(user_crt, (int)strlen(user_crt));
+		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式
+		SSL_CTX_use_certificate(ssl_ctx->ctx, cert);
+		BIO_free(cbio);
+		//SSL_CTX_use_certificate_file(ssl_ctx->ctx, "cacert.pem", SSL_FILETYPE_PEM);
+
+		BIO* b = BIO_new_mem_buf((void*)pri_key, (int)strlen(pri_key));
+		EVP_PKEY* evpkey = PEM_read_bio_PrivateKey(b, NULL, NULL, NULL);
+		SSL_CTX_use_PrivateKey(ssl_ctx->ctx, evpkey);
+		BIO_free(b);
+		//SSL_CTX_use_PrivateKey_file(ssl_ctx->ctx, "privkey.pem.unsecure", SSL_FILETYPE_PEM);
+	}
+
+	ssl_ctx->ssl = SSL_new(ssl_ctx->ctx);
+	ssl_ctx->rbio = BIO_new(BIO_s_mem());
+	ssl_ctx->wbio = BIO_new(BIO_s_mem());
+	ssl_ctx->rbuf = (char*)malloc(DATA_BUFSIZE);
+	ssl_ctx->wbuf = (char*)malloc(DATA_BUFSIZE);
+	ssl_ctx->rsize = DATA_BUFSIZE;
+	ssl_ctx->wsize = DATA_BUFSIZE;
+	if (!ssl_ctx->ssl || !ssl_ctx->rbio || !ssl_ctx->wbio || !ssl_ctx->rbuf || !ssl_ctx->wbuf) {
+		if (ssl_ctx->rbio) BIO_free(ssl_ctx->rbio);//这个时候ssl还没有和bio绑定，这里要主动释放
+		if (ssl_ctx->wbio) BIO_free(ssl_ctx->wbio);
+		if (ssl_ctx->ssl) SSL_free(ssl_ctx->ssl);
+		if (ssl_ctx->ctx) SSL_CTX_free(ssl_ctx->ctx);
+		if (ssl_ctx->rbuf) free(ssl_ctx->rbuf);
+		if (ssl_ctx->wbuf) free(ssl_ctx->wbuf);
+		free(ssl_ctx);
+		return false;
+	}
+	SSL_set_bio(ssl_ctx->ssl, ssl_ctx->rbio, ssl_ctx->wbio);
+	if (openssl_type == OPENSSL_CLIENT) SSL_set_connect_state(ssl_ctx->ssl);
+	else SSL_set_accept_state(ssl_ctx->ssl);
+	IocpSock->_user_data = ssl_ctx;
+	IocpSock->_conn_type = SSL_CONN;
+
+	if (openssl_type == OPENSSL_CLIENT) {
+		int ret = SSL_do_handshake(ssl_ctx->ssl);
+		ssl_do_write(ssl_ctx, IocpSock);
+	}
+	return true;
+}
+
+static void Hsocket_upto_SSL_Client(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+	if (!Hsocket_SSL_init(IocpSock, OPENSSL_CLIENT, NULL, NULL, NULL))
+		return do_close(IocpSock, IocpBuff, 0);
+	PostRecv(IocpSock, IocpBuff);
+}
+#endif
+
 static void do_connect(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 	//hsocket_set_keepalive(IocpSock->fd);
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);  //连接成功后刷新套接字属性
+#ifdef OPENSSL_SUPPORT
+	if (IocpSock->_conn_type == SSL_CONN) {
+		return Hsocket_upto_SSL_Client(IocpSock, IocpBuff);
+	}
+#endif
 	BaseProtocol* proto  = IocpSock->_user;
 	if (IocpSock->fd != INVALID_SOCKET) {
 		proto->Lock();
@@ -438,6 +655,20 @@ static void do_connect(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 		proto->UnLock();
 	}
 	do_close(IocpSock, IocpBuff, 0);
+}
+
+static void do_timer(HSOCKET hsock) {
+	BaseProtocol* proto = hsock->_user;
+	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
+	Timer_Callback callback = timer_ctx->call;
+	callback(hsock, proto);
+	if (timer_ctx->timer) {
+		LONGUNLOCK(&timer_ctx->lock);
+	}
+	else {
+		free(timer_ctx);
+		ReleaseIOCP_Socket(hsock);
+	}
 }
 
 static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
@@ -476,6 +707,10 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 		err = 0;
 		bRet = GetQueuedCompletionStatus(reactor->ComPort, &dwIoSize, (PULONG_PTR)&IocpSock, (LPOVERLAPPED*)&IocpBuff, INFINITE);
 		if (IocpBuff != NULL) IocpSock = IocpBuff->hsock;   //强制closesocket后可能返回错误的IocpSock，从IocpBuff中获取正确的IocpSock
+		else if (IocpSock->_conn_type == ITMER) {
+			do_timer(IocpSock);
+			continue;
+		}
 		if (bRet == false){
 			err = WSAGetLastError();  //64L,121L,995L
 			if (IocpBuff == NULL || WAIT_TIMEOUT == err || ERROR_IO_PENDING == err) continue;
@@ -544,6 +779,12 @@ int __STDCALL ReactorStart(Reactor* reactor){
 	}
 	closesocket(tempSock);
 
+#ifdef OPENSSL_SUPPORT
+	SSL_library_init();
+	SSL_load_error_strings();
+	OpenSSL_add_all_algorithms();
+#endif
+
 	HANDLE ThreadHandle;
 	ThreadHandle = CreateThread(NULL, 0, mainIOCPServer, reactor, 0, NULL);
 	if (NULL == ThreadHandle) {
@@ -589,6 +830,36 @@ int __STDCALL FactoryStop(BaseFactory* fc){
 	}
 	fc->FactoryClose();
 	return 0;
+}
+
+static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
+	HSOCKET hsock = (HSOCKET)lpParam;
+	Reactor* reactor = hsock->factory->reactor;
+	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
+	if (LONGTRYLOCK(&timer_ctx->lock)) {
+		PostQueuedCompletionStatus(reactor->ComPort, 0, (ULONG_PTR)hsock, NULL);
+	}
+}
+
+HSOCKET	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback) {
+	BaseFactory* factory = proto->factory;
+	HSOCKET hsock = NewIOCP_Socket();
+	hsock->_conn_type = ITMER;
+	hsock->factory = factory;
+	hsock->_user = proto;
+	HTIMER timer_ctx = (HTIMER)malloc(sizeof(IOCP_TIMER));
+	if (!timer_ctx) return NULL;
+	memset(timer_ctx, 0x0, sizeof(IOCP_TIMER));
+	timer_ctx->call = callback;
+	CreateTimerQueueTimer(&timer_ctx->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, duetime, looptime, 0);
+	hsock->_user_data = timer_ctx;
+	return hsock;
+}
+
+void __STDCALL TimerDelete(HSOCKET hsock) {
+	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
+	DeleteTimerQueueTimer(NULL, timer_ctx->timer, NULL);
+	timer_ctx->timer = NULL;
 }
 
 static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int listen_port)
@@ -773,6 +1044,15 @@ static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len){
 	return true;
 }
 
+#ifdef OPENSSL_SUPPORT
+static bool HsocketSendSSL(HSOCKET hsock, const char* data, int len) {
+	struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->_user_data;
+	SSL_write(ssl_ctx->ssl, data, len);
+	ssl_do_write(ssl_ctx, hsock);
+	return true;
+}
+#endif
+
 #ifdef KCP_SUPPORT
 static bool HsocketSendKcp(HSOCKET hsock, const char* data, int len) {
 	Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
@@ -791,6 +1071,10 @@ bool __STDCALL HsocketSend(HSOCKET hsock, const char* data, int len) {
 		case TCP_CONN:
 		case UDP_CONN:
 			return HsocketSendEx(hsock, data, len);
+#ifdef OPENSSL_SUPPORT
+		case SSL_CONN:
+			return HsocketSendSSL(hsock, data, len);
+#endif
 #ifdef KCP_SUPPORT
 		case KCP_CONN:
 			return HsocketSendKcp(hsock, data, len);
@@ -820,7 +1104,9 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 		struct sockaddr_in6 toaddr = { 0x0 };
 		toaddr.sin6_family = AF_INET6;
 		toaddr.sin6_port = htons(port);
-		inet_pton(AF_INET6, ip, &toaddr.sin6_addr);
+		char v6ip[40] = { 0x0 };
+		const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, dst, &toaddr.sin6_addr);
 
 		bool ret = IOCPPostSendUDPEx(hsock, IocpBuff, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 		if (ret == false) {
@@ -909,6 +1195,14 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 		memmove(hsock->recv_buf, hsock->recv_buf + len, IocpBuff->offset);
 		return IocpBuff->offset;
 	}
+#ifdef OPENSSL_SUPPORT
+	case SSL_CONN:{
+		struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->_user_data;
+		ssl_ctx->roffset -= len;
+		memmove(ssl_ctx->rbuf, ssl_ctx->rbuf + len, ssl_ctx->roffset);
+		return ssl_ctx->roffset;
+	}
+#endif
 #ifdef KCP_SUPPORT
 	case KCP_CONN:{
 		Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
@@ -925,7 +1219,8 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 
 void __STDCALL HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port) {
 	if (hsock->_conn_type == UDP_CONN || hsock->_conn_type == KCP_CONN) {
-		hsock->peer_addr.sin6_port = htons(port);
+		InterlockedExchange16((short*) & hsock->peer_addr.sin6_port, htons(port));
+		//hsock->peer_addr.sin6_port = htons(port);
 		char v6ip[40] = { 0x0 };
 		const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
 		inet_pton(AF_INET6, dst, &hsock->peer_addr.sin6_addr);
@@ -975,6 +1270,16 @@ int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
 		inet_ntop(res->ai_family, &((struct sockaddr_in6*)res->ai_addr)->sin6_addr, buf, size);
 	return 0;
 }
+
+#ifdef OPENSSL_SUPPORT
+bool __STDCALL HsocketUptoSSL(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key) {
+	bool ret = false;
+	if (hsock->_conn_type == TCP_CONN) {
+		ret = Hsocket_SSL_init(hsock, openssl_type, ca_crt, user_crt, pri_key);
+	}
+	return ret;
+}
+#endif
 
 #ifdef KCP_SUPPORT
 static int kcp_send_callback(const char* buf, int len, ikcpcb* kcp, void* user){

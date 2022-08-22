@@ -22,6 +22,10 @@
 #include <sys/timerfd.h>
 #include <sys/prctl.h>
 #include <netdb.h>
+#ifdef OPENSSL_SUPPORT
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
 
 #define DATA_BUFSIZE 5120
 
@@ -31,6 +35,14 @@ enum{
 	WRITE,
     CONNECT,
 };
+
+#ifdef OPENSSL_SUPPORT
+struct SSL_Content{
+	uint8_t 	handshaked;
+	SSL_CTX*	ctx;
+	SSL*		ssl;
+};
+#endif
 
 #ifdef KCP_SUPPORT
 #include "ikcp.h"
@@ -84,6 +96,16 @@ static HSOCKET new_hsockt(){
 
 static void release_hsock(HSOCKET hsock){
 	if (hsock){
+#ifdef OPENSSL_SUPPORT
+		if (hsock->_conn_type == SSL_CONN){
+			struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->_user_data;
+			if (ssl_ctx){
+				if (ssl_ctx->ssl) {SSL_shutdown(ssl_ctx->ssl); SSL_free(ssl_ctx->ssl);}
+				if (ssl_ctx->ctx) SSL_CTX_free(ssl_ctx->ctx);
+				free(ssl_ctx);
+			}
+		}
+#endif
 #ifdef KCP_SUPPORT
 		if (hsock->_conn_type == KCP_CONN){
 			Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
@@ -272,7 +294,113 @@ static void do_close(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
     release_hsock(hsock);
 }
 
+#ifdef OPENSSL_SUPPORT
+static bool do_ssl_init(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key){
+	struct SSL_Content* ssl_ctx = (struct SSL_Content*)malloc(sizeof(struct SSL_Content));
+	if (!ssl_ctx) { return false; }
+
+	memset(ssl_ctx, 0, sizeof(struct SSL_Content));
+	if (openssl_type == OPENSSL_CLIENT) ssl_ctx->ctx = SSL_CTX_new(SSLv23_client_method());
+	else ssl_ctx->ctx = SSL_CTX_new(SSLv23_server_method());
+	if (ssl_ctx->ctx == NULL) {
+		free(ssl_ctx);
+		return false;
+	}
+	if (openssl_type == OPENSSL_SERVER){
+		SSL_CTX_set_verify( ssl_ctx->ctx,SSL_VERIFY_NONE, NULL);
+
+		BIO* cbio = BIO_new_mem_buf(user_crt, (int)strlen(user_crt));
+		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式
+		SSL_CTX_use_certificate(ssl_ctx->ctx, cert);
+		BIO_free(cbio);
+		//SSL_CTX_use_certificate_file(ssl_ctx->ctx, "cacert.pem", SSL_FILETYPE_PEM);
+
+		BIO* b = BIO_new_mem_buf((void*)pri_key, strlen(pri_key));
+		EVP_PKEY* evpkey = PEM_read_bio_PrivateKey(b, NULL, NULL, NULL);
+		SSL_CTX_use_PrivateKey(ssl_ctx->ctx, evpkey);
+		BIO_free(b);
+		//SSL_CTX_use_PrivateKey_file(ssl_ctx->ctx, "privkey.pem.unsecure", SSL_FILETYPE_PEM);
+	}
+	ssl_ctx->ssl = SSL_new(ssl_ctx->ctx);
+	if (!ssl_ctx->ssl){
+		SSL_CTX_free(ssl_ctx->ctx);
+		free(ssl_ctx);
+		return false;
+	}
+	SSL_set_fd(ssl_ctx->ssl, hsock->fd);
+	if (openssl_type == OPENSSL_CLIENT)
+		SSL_set_connect_state(ssl_ctx->ssl);
+	else
+		SSL_set_accept_state(ssl_ctx->ssl);
+	hsock->_user_data = ssl_ctx;
+	return true;
+}
+
+static void do_ssl_upto_client(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
+	if (!do_ssl_init(hsock, OPENSSL_CLIENT, NULL, NULL, NULL)){
+		do_close(hsock, fc, proto);
+		return;
+	}
+
+	struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->_user_data;
+	int ret = SSL_do_handshake(ssl_ctx->ssl);
+	if (ret == 1){
+		ssl_ctx->handshaked = 1;
+		epoll_add_write(hsock);
+		if (hsock->_stat < SOCKET_CLOSED){
+			proto->Lock();
+			if (hsock->_stat < SOCKET_CLOSED){
+				proto->ConnectionMade(hsock, hsock->_conn_type);
+				hsock->_stat = SOCKET_CONNECTED;
+			}
+			proto->UnLock();
+		}
+	}else{
+		int err = SSL_get_error(ssl_ctx->ssl, ret);
+		switch (err){
+		case SSL_ERROR_WANT_WRITE:
+		case SSL_ERROR_WANT_READ:
+			epoll_mod_read(hsock);
+			break;
+		default:
+			do_close(hsock, fc, proto);
+			break;
+		}
+	}
+}
+
+static int do_ssl_handshak(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto, struct SSL_Content* ssl_ctx){
+	int ret = SSL_do_handshake(ssl_ctx->ssl);
+	if (ret == 1){
+		ssl_ctx->handshaked = 1;
+		epoll_add_write(hsock);
+		if (hsock->_stat < SOCKET_CLOSED){
+			proto->Lock();
+			if (hsock->_stat < SOCKET_CLOSED){
+				proto->ConnectionMade(hsock, hsock->_conn_type);
+				hsock->_stat = SOCKET_CONNECTED;
+			}
+			proto->UnLock();
+		}
+		return 0;
+	}else{
+		int err = SSL_get_error(ssl_ctx->ssl, ret);
+		switch (err){
+		case SSL_ERROR_WANT_WRITE:
+		case SSL_ERROR_WANT_READ:
+			return 0;
+		default:
+			return -1;
+		}
+	}
+}
+#endif
+
 static void do_connect(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
+#ifdef OPENSSL_SUPPORT
+if (hsock->_conn_type == SSL_CONN)
+	return do_ssl_upto_client(hsock, fc, proto);
+#endif
 	epoll_add_write(hsock);
 	if (hsock->_stat < SOCKET_CLOSED){
 		proto->Lock();
@@ -285,6 +413,43 @@ static void do_connect(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 	}
 	epoll_mod_read(hsock);
 }
+
+#ifdef OPENSSL_SUPPORT
+static int do_read_ssl(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
+	struct SSL_Content* ssl_ctx = (struct SSL_Content*)(hsock->_user_data);
+	if (!ssl_ctx->handshaked)
+		return do_ssl_handshak(hsock, fc, proto, ssl_ctx);
+	char* buf = NULL;
+	size_t buflen = 0;
+	ssize_t n = 0;
+	EPOLL_BUFF* rbuf = &hsock->_recv_buf;
+	while (1){
+		buf = rbuf->buff + rbuf->offset;
+		buflen = rbuf->size - rbuf->offset;
+		n = SSL_read(ssl_ctx->ssl, buf, buflen);
+		if (n > 0){
+			rbuf->offset += n;
+			if (size_t(n) == buflen){
+				size_t newsize = rbuf->size*2;
+				char* newbuf = (char*)realloc(rbuf->buff , newsize);
+				if (newbuf == NULL) return -1;
+				rbuf->buff = newbuf;
+				rbuf->size = newsize;
+				continue;
+			}
+			break;
+		}
+		else{
+			int err = SSL_get_error(ssl_ctx->ssl, n);
+        	if (err == SSL_ERROR_WANT_READ) {
+            	break;
+        	}
+			return -1;
+		}
+	}
+	return rbuf->offset;
+}
+#endif
 
 static int do_read_tcp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 {
@@ -566,10 +731,51 @@ static void do_write_tcp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 	}
 }
 
+#ifdef OPENSSL_SUPPORT
+static void do_write_ssl(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
+{
+	struct SSL_Content* ssl_ctx = (struct SSL_Content*)(hsock->_user_data);
+	if (!ssl_ctx->handshaked){
+		do_write_tcp(hsock, fc, proto);
+		return;
+	}
+	EPOLL_BUFF *sbuf = &hsock->_send_buf;
+	if (__sync_fetch_and_or(&sbuf->lock_flag, 1)) return;
+
+	char* data = sbuf->buff;
+	int len = sbuf->offset;
+	int not_over = 0;
+	if (len > 0)
+	{
+		int n = SSL_write(ssl_ctx->ssl, data, len);
+		if(n > 0) 
+		{
+			sbuf->offset -= n;
+			memmove(data, data + n, sbuf->offset);
+			if (n < len)
+				not_over = 1;
+		}
+		else if(errno == EINTR || errno == EAGAIN) 
+			not_over = 1;
+	}
+	__sync_fetch_and_and(&sbuf->lock_flag, 0);
+	
+	if (not_over)
+		epoll_mod_write(hsock);
+	else if (hsock->_stat >= SOCKET_CLOSEING){
+		shutdown(hsock->fd, SHUT_RD);
+	}
+}
+#endif
+
 static void do_write(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 {
 	if (hsock->_conn_type == TCP_CONN)
 		do_write_tcp(hsock, fc, proto);
+#ifdef OPENSSL_SUPPORT
+	else if (hsock->_conn_type == SSL_CONN)
+		do_write_ssl(hsock, fc, proto);
+#endif
 	else
 		do_write_udp(hsock, fc, proto);
 }
@@ -606,7 +812,7 @@ static void do_timer_callback(HSOCKET hsock, BaseFactory* fc, BaseProtocol* prot
 	read(hsock->fd, &value, sizeof(uint64_t)); //必须读取，否则定时器异常
 	if (hsock->_stat < SOCKET_CLOSED)
 	{
-		hsock->_callback(proto);
+		hsock->_callback(hsock, proto);
 		epoll_mod_timer(hsock);
 	}
 	else
@@ -706,6 +912,12 @@ int ReactorStart(Reactor* reactor)
 	if(reactor->eptfd < 0)
 		return -1;
 	reactor->CPU_COUNT = get_nprocs_conf();
+
+#ifdef OPENSSL_SUPPORT
+	SSL_library_init();
+	SSL_load_error_strings();
+	OpenSSL_add_all_algorithms();
+#endif
 
 	pthread_attr_t attr;
    	pthread_t tid;
@@ -860,7 +1072,7 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 	return hsock;
 }
 
-HSOCKET TimerCreate(BaseProtocol* proto, int duetime, int looptime, timer_callback callback)
+HSOCKET TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback)
 {
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
@@ -1098,7 +1310,8 @@ int HsocketPopBuf(HSOCKET hsock, int len)
 
 void HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port){
 	if (hsock->_conn_type == UDP_CONN || hsock->_conn_type == KCP_CONN) {
-		hsock->peer_addr.sin6_port = htons(port);
+		__sync_lock_test_and_set(&hsock->peer_addr.sin6_port, htons(port));
+		//hsock->peer_addr.sin6_port = htons(port);
 		char v6ip[40] = { 0x0 };
 		socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
 		inet_pton(AF_INET6, v6ip, &hsock->peer_addr.sin6_addr);
@@ -1151,6 +1364,35 @@ int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
 		inet_ntop(res->ai_family, &((struct sockaddr_in6*)res->ai_addr)->sin6_addr, buf, size);
 	return 0;
 }
+
+#ifdef OPENSSL_SUPPORT
+bool __STDCALL HsocketUptoSSL(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key){
+	bool ret = false;
+	if (hsock->_conn_type == TCP_CONN){
+		ret = do_ssl_init(hsock, openssl_type, ca_crt, user_crt, pri_key);
+		hsock->_conn_type = SSL_CONN;
+	}
+	if (ret && openssl_type == OPENSSL_CLIENT){
+		struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->_user_data;
+		int res = SSL_do_handshake(ssl_ctx->ssl);
+		if (res == 1){
+			ssl_ctx->handshaked = 1;
+			return true;
+		}else{
+			int err = SSL_get_error(ssl_ctx->ssl, res);
+			switch (err){
+			case SSL_ERROR_WANT_WRITE:
+			case SSL_ERROR_WANT_READ:
+				break;
+			default:
+				return false;
+				break;
+			}
+		}
+	}
+	return ret;
+}
+#endif
 
 #ifdef KCP_SUPPORT
 static int kcp_send_callback(const char* buf, int len, ikcpcb* kcp, void* user){

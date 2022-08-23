@@ -29,6 +29,12 @@
 
 #define DATA_BUFSIZE 5120
 
+int eprfd = 0;
+int epwfd = 0;
+int eptfd = 0;
+int EpollWorker = 0;
+std::map<uint16_t, BaseFactory*> Factorys;
+
 enum{
     ACCEPT = 0,
     READ,
@@ -167,71 +173,71 @@ static void epoll_add_accept(HSOCKET hsock) {
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLERR | EPOLLET;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->eprfd, EPOLL_CTL_ADD, hsock->fd, &ev);	
+	epoll_ctl(eprfd, EPOLL_CTL_ADD, hsock->fd, &ev);	
 }
 
 static void epoll_add_connect(HSOCKET hsock){
 	struct epoll_event ev;
 	ev.events = EPOLLOUT | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->eprfd, EPOLL_CTL_ADD, hsock->fd, &ev);
+	epoll_ctl(eprfd, EPOLL_CTL_ADD, hsock->fd, &ev);
 }
 
 static void epoll_add_timer(HSOCKET hsock) {
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->eptfd, EPOLL_CTL_ADD, hsock->fd, &ev);	
+	epoll_ctl(eptfd, EPOLL_CTL_ADD, hsock->fd, &ev);	
 }
 
 static void epoll_mod_timer(HSOCKET hsock) {
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->eptfd, EPOLL_CTL_MOD, hsock->fd, &ev);	
+	epoll_ctl(eptfd, EPOLL_CTL_MOD, hsock->fd, &ev);	
 }
 
 static void epoll_del_timer(HSOCKET hsock) {
 	struct epoll_event ev;
-	epoll_ctl(hsock->factory->reactor->eptfd, EPOLL_CTL_DEL, hsock->fd, &ev);
+	epoll_ctl(eptfd, EPOLL_CTL_DEL, hsock->fd, &ev);
 }
 
 static void epoll_add_read(HSOCKET hsock) {
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->eprfd, EPOLL_CTL_ADD, hsock->fd, &ev);	
+	epoll_ctl(eprfd, EPOLL_CTL_ADD, hsock->fd, &ev);	
 }
 
 static void epoll_mod_read(HSOCKET hsock) {
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->eprfd, EPOLL_CTL_MOD, hsock->fd, &ev);	
+	epoll_ctl(eprfd, EPOLL_CTL_MOD, hsock->fd, &ev);	
 }
 
 static void epoll_add_write(HSOCKET hsock){
 	struct epoll_event ev;
 	ev.events = EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->epwfd, EPOLL_CTL_ADD, hsock->fd, &ev);
+	epoll_ctl(epwfd, EPOLL_CTL_ADD, hsock->fd, &ev);
 }
 
 static void epoll_mod_write(HSOCKET hsock){
 	struct epoll_event ev;
 	ev.events = EPOLLOUT | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->factory->reactor->epwfd, EPOLL_CTL_MOD, hsock->fd, &ev);
+	epoll_ctl(epwfd, EPOLL_CTL_MOD, hsock->fd, &ev);
 }
 
 static void epoll_del_write(HSOCKET hsock) {
 	struct epoll_event ev;
-	epoll_ctl(hsock->factory->reactor->epwfd, EPOLL_CTL_DEL, hsock->fd, &ev);
+	epoll_ctl(epwfd, EPOLL_CTL_DEL, hsock->fd, &ev);
 }
 
 static void epoll_del_read(HSOCKET hsock) {
 	struct epoll_event ev;
-	epoll_ctl(hsock->factory->reactor->eprfd, EPOLL_CTL_DEL, hsock->fd, &ev);	
+	epoll_ctl(eprfd, EPOLL_CTL_DEL, hsock->fd, &ev);	
 }
 
 static void set_linger_for_fd(int fd){
@@ -646,14 +652,13 @@ static void do_accpet(HSOCKET listenhsock, BaseFactory* fc){
 
 static void read_work_thread(void* args){
 	prctl(PR_SET_NAME,"read");
-    Reactor* reactor = (Reactor*)args;
 	BaseFactory* factory = NULL;
     int i = 0,n = 0;
-    struct epoll_event *pev = (struct epoll_event*)malloc(sizeof(struct epoll_event) * reactor->maxevent);
+    struct epoll_event *pev = (struct epoll_event*)malloc(sizeof(struct epoll_event) * 64);
 	if(pev == NULL) { return ; }
     volatile HSOCKET hsock = NULL;
 	while (1){
-		n = epoll_wait(reactor->eprfd, pev, reactor->maxevent, -1);
+		n = epoll_wait(eprfd, pev, 64, -1);
 		for(i = 0; i < n; i++) {
             hsock = (HSOCKET)pev[i].data.ptr;
 			factory = hsock->factory;
@@ -783,10 +788,9 @@ static void do_write(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 static void write_work_thread(void* args)
 {
 	prctl(PR_SET_NAME,"write");
-    Reactor* reactor = (Reactor*)args;
 	BaseFactory* factory = NULL;
     int i = 0,n = 0;
-    struct epoll_event *pev = (struct epoll_event*)malloc(sizeof(struct epoll_event) * reactor->maxevent);
+    struct epoll_event *pev = (struct epoll_event*)malloc(sizeof(struct epoll_event) * 64);
 	if(pev == NULL) 
 	{
 		return ;
@@ -794,7 +798,7 @@ static void write_work_thread(void* args)
     volatile HSOCKET hsock = NULL;
 	while (1)
 	{
-		n = epoll_wait(reactor->epwfd, pev, reactor->maxevent, -1);
+		n = epoll_wait(epwfd, pev, 64, -1);
 		for(i = 0; i < n; i++) 
 		{
             hsock = (HSOCKET)pev[i].data.ptr;
@@ -827,10 +831,9 @@ static void do_timer_callback(HSOCKET hsock, BaseFactory* fc, BaseProtocol* prot
 static void timer_work_thread(void* args)
 {
 	prctl(PR_SET_NAME,"timer");
-    Reactor* reactor = (Reactor*)args;
 	BaseFactory* factory = NULL;
     int i = 0,n = 0;
-    struct epoll_event *pev = (struct epoll_event*)malloc(sizeof(struct epoll_event) * reactor->maxevent);
+    struct epoll_event *pev = (struct epoll_event*)malloc(sizeof(struct epoll_event) * 64);
 	if(pev == NULL) 
 	{
 		return ;
@@ -838,7 +841,7 @@ static void timer_work_thread(void* args)
     volatile HSOCKET hsock = NULL;
 	while (1)
 	{
-		n = epoll_wait(reactor->eptfd, pev, reactor->maxevent, -1);
+		n = epoll_wait(eptfd, pev, 64, -1);
 		for(i = 0; i < n; i++) 
 		{
             hsock = (HSOCKET)pev[i].data.ptr;
@@ -853,16 +856,15 @@ static void timer_work_thread(void* args)
 static void main_work_thread(void* args)
 {
 	prctl(PR_SET_NAME,"actor");
-	Reactor* reactor = (Reactor*)args;
     int i = 0;
 	int rc;
-    for (i = 0; i < reactor->CPU_COUNT; i++)
+    for (i = 0; i < EpollWorker; i++)
 	//for (i = 0; i < 1; i++)
 	{
 		pthread_attr_t rattr;
    		pthread_t rtid;
 		pthread_attr_init(&rattr);
-		if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, reactor)) != 0)
+		if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, NULL)) != 0)
 		{
 			return;
 		}
@@ -873,26 +875,26 @@ static void main_work_thread(void* args)
 		pthread_attr_t wattr;
    		pthread_t wtid;
 		pthread_attr_init(&wattr);
-		if((rc = pthread_create(&wtid, &wattr, (void*(*)(void*))write_work_thread, reactor)) != 0)
+		if((rc = pthread_create(&wtid, &wattr, (void*(*)(void*))write_work_thread, NULL)) != 0)
 		{
 			return;
 		}
 	}
 
-	for (i = 0; i < reactor->CPU_COUNT; i++)
+	for (i = 0; i < EpollWorker; i++)
 	{
 		pthread_attr_t tattr;
    		pthread_t ttid;
 		pthread_attr_init(&tattr);
-		if((rc = pthread_create(&ttid, &tattr, (void*(*)(void*))timer_work_thread, reactor)) != 0)
+		if((rc = pthread_create(&ttid, &tattr, (void*(*)(void*))timer_work_thread, NULL)) != 0)
 		{
 			return;
 		}
 	}
-	while (reactor->Run)
+	while (true)
 	{
 		std::map<uint16_t, BaseFactory*>::iterator iter;
-		for (iter = reactor->FactoryAll.begin(); iter != reactor->FactoryAll.end(); ++iter)
+		for (iter = Factorys.begin(); iter != Factorys.end(); ++iter)
 		{
 			iter->second->FactoryLoop();
 		}
@@ -900,18 +902,18 @@ static void main_work_thread(void* args)
 	}
 }
 
-int ReactorStart(Reactor* reactor)
+int ReactorStart()
 {
-    reactor->eprfd = epoll_create(reactor->maxevent);
-	if(reactor->eprfd < 0)
+    eprfd = epoll_create(64);
+	if(eprfd < 0)
 		return -1;
-	reactor->epwfd = epoll_create(reactor->maxevent);
-	if(reactor->epwfd < 0)
+	epwfd = epoll_create(64);
+	if(epwfd < 0)
 		return -1;
-	reactor->eptfd = epoll_create(reactor->maxevent);
-	if(reactor->eptfd < 0)
+	eptfd = epoll_create(64);
+	if(eptfd < 0)
 		return -1;
-	reactor->CPU_COUNT = get_nprocs_conf();
+	EpollWorker = get_nprocs_conf();
 
 #ifdef OPENSSL_SUPPORT
 	SSL_library_init();
@@ -924,7 +926,7 @@ int ReactorStart(Reactor* reactor)
 	pthread_attr_init(&attr);
 	int rc;
 
-	if((rc = pthread_create(&tid, &attr, (void*(*)(void*))main_work_thread, reactor)) != 0)
+	if((rc = pthread_create(&tid, &attr, (void*(*)(void*))main_work_thread, NULL)) != 0)
 	{
 		return -1;
 	}
@@ -955,17 +957,17 @@ int	FactoryRun(BaseFactory* fc)
 		epoll_add_accept(hsock);
 	}
 	fc->FactoryInited();
-	fc->reactor->FactoryAll.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
+	Factorys.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
 	return 0;
 }
 
 int FactoryStop(BaseFactory* fc)
 {
 	std::map<uint16_t, BaseFactory*>::iterator iter;
-	iter = fc->reactor->FactoryAll.find(fc->ServerPort);
-	if (iter != fc->reactor->FactoryAll.end())
+	iter = Factorys.find(fc->ServerPort);
+	if (iter != Factorys.end())
 	{
-		fc->reactor->FactoryAll.erase(iter);
+		Factorys.erase(iter);
 	}
 	fc->FactoryClose();
 	return 0;

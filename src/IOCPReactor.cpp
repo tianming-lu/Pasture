@@ -28,6 +28,10 @@
 #define ACCEPT	2
 #define CONNECT 3
 
+HANDLE CompletionPort = NULL;
+DWORD  CompletionPortWorker = 0;
+std::map<uint16_t, BaseFactory*> Factorys;
+
 static LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 static LPFN_CONNECTEX lpfnConnectEx = NULL;
 
@@ -358,7 +362,6 @@ static void do_aceept(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff){
 	PostAcceptClient(IocpListenSock);
 
 	BaseFactory* fc = IocpListenSock->factory;
-	Reactor* reactor = fc->reactor;
 	//连接成功后刷新套接字属性
 	setsockopt(IocpBuff->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*) & (IocpListenSock->fd), sizeof(IocpListenSock->fd));
 
@@ -383,7 +386,7 @@ static void do_aceept(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff){
 	getpeername(IocpSock->fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
 
 	InterlockedIncrement(&proto->sockCount);
-	CreateIoCompletionPort((HANDLE)IocpSock->fd, reactor->ComPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
+	CreateIoCompletionPort((HANDLE)IocpSock->fd, CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 
 	proto->Lock();
 	proto->ConnectionMade(IocpSock, IocpSock->_conn_type);
@@ -693,7 +696,6 @@ static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 /////////////////////////////////////////////////////////////////////////
 //服务线程
 DWORD WINAPI serverWorkerThread(LPVOID pParam){
-	Reactor* reactor = (Reactor*)pParam;
 	DWORD	dwIoSize = 0;
 	IOCP_SOCKET* IocpSock = NULL;
 	IOCP_BUFF* IocpBuff = NULL;		//IO数据,用于发起接收重叠操作
@@ -705,7 +707,7 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 		IocpSock = NULL;
 		IocpBuff = NULL;
 		err = 0;
-		bRet = GetQueuedCompletionStatus(reactor->ComPort, &dwIoSize, (PULONG_PTR)&IocpSock, (LPOVERLAPPED*)&IocpBuff, INFINITE);
+		bRet = GetQueuedCompletionStatus(CompletionPort, &dwIoSize, (PULONG_PTR)&IocpSock, (LPOVERLAPPED*)&IocpBuff, INFINITE);
 		if (IocpBuff != NULL) IocpSock = IocpBuff->hsock;   //强制closesocket后可能返回错误的IocpSock，从IocpBuff中获取正确的IocpSock
 		else if (IocpSock->_conn_type == ITMER) {
 			do_timer(IocpSock);
@@ -730,18 +732,18 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 }
 
 DWORD WINAPI mainIOCPServer(LPVOID pParam){
-	Reactor* reactor = (Reactor*)pParam;
-	for (int i = 0; i < reactor->CPU_COUNT; i++){
+	HANDLE ThreadHandle = NULL;
+	for (DWORD i = 0; i < CompletionPortWorker; i++){
 	//for (unsigned int i = 0; i < 1; i++){
-		HANDLE ThreadHandle = CreateThread(NULL, 0, serverWorkerThread, pParam, 0, NULL);
+		ThreadHandle = CreateThread(NULL, 0, serverWorkerThread, pParam, 0, NULL);
 		if (NULL == ThreadHandle) {
 			return -4;
 		}
 		CloseHandle(ThreadHandle);
 	}
 	std::map<uint16_t, BaseFactory*>::iterator iter;
-	while (reactor->Run){
-		for (iter = reactor->FactoryAll.begin(); iter != reactor->FactoryAll.end(); ++iter){
+	while (true){
+		for (iter = Factorys.begin(); iter != Factorys.end(); ++iter){
 			iter->second->FactoryLoop();
 		}
 		Sleep(100);
@@ -749,23 +751,23 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam){
 	return 0;
 }
 
-int __STDCALL ReactorStart(Reactor* reactor){
+int __STDCALL ReactorStart(){
 	WSADATA wsData;
 	if (0 != WSAStartup(0x0202, &wsData)){
 		return SOCKET_ERROR;
 	}
 
-	reactor->ComPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-	if (reactor->ComPort == NULL){
+	CompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+	if (!CompletionPort){
 		return -2;
 	}
 
 	SYSTEM_INFO sysInfor;
 	GetSystemInfo(&sysInfor);
-	reactor->CPU_COUNT = sysInfor.dwNumberOfProcessors;
+	CompletionPortWorker = sysInfor.dwNumberOfProcessors;
 
 	SOCKET tempSock = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
-	//使用WSAIoctl获取AcceptEx函数指针
+	//使用WSAIoctl获取AcceptEx和ConnectEx函数指针
 	DWORD dwbytes = 0;
 	GUID guidAcceptEx = WSAID_ACCEPTEX;
 	if (0 != WSAIoctl(tempSock, SIO_GET_EXTENSION_FUNCTION_POINTER, &guidAcceptEx, sizeof(guidAcceptEx),
@@ -786,16 +788,12 @@ int __STDCALL ReactorStart(Reactor* reactor){
 #endif
 
 	HANDLE ThreadHandle;
-	ThreadHandle = CreateThread(NULL, 0, mainIOCPServer, reactor, 0, NULL);
+	ThreadHandle = CreateThread(NULL, 0, mainIOCPServer, NULL, 0, NULL);
 	if (NULL == ThreadHandle) {
 		return -4;
 	}
 	CloseHandle(ThreadHandle);
 	return 0;
-}
-
-void __STDCALL ReactorStop(Reactor* reactor){
-	reactor->Run = false;
 }
 
 int __STDCALL FactoryRun(BaseFactory* fc){
@@ -813,20 +811,20 @@ int __STDCALL FactoryRun(BaseFactory* fc){
 		IcpSock->factory = fc;
 		IcpSock->fd = fc->Listenfd;
 
-		CreateIoCompletionPort((HANDLE)fc->Listenfd, fc->reactor->ComPort, (ULONG_PTR)IcpSock, 0);
-		for (int i = 0; i < fc->reactor->CPU_COUNT; i++)
+		CreateIoCompletionPort((HANDLE)fc->Listenfd, CompletionPort, (ULONG_PTR)IcpSock, 0);
+		for (DWORD i = 0; i < CompletionPortWorker; i++)
 			PostAcceptClient(IcpSock);
 	}
 	fc->FactoryInited();
-	fc->reactor->FactoryAll.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
+	Factorys.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
 	return 0;
 }
 
 int __STDCALL FactoryStop(BaseFactory* fc){
 	std::map<uint16_t, BaseFactory*>::iterator iter;
-	iter = fc->reactor->FactoryAll.find(fc->ServerPort);
-	if (iter != fc->reactor->FactoryAll.end()){
-		fc->reactor->FactoryAll.erase(iter);
+	iter = Factorys.find(fc->ServerPort);
+	if (iter != Factorys.end()){
+		Factorys.erase(iter);
 	}
 	fc->FactoryClose();
 	return 0;
@@ -834,10 +832,9 @@ int __STDCALL FactoryStop(BaseFactory* fc){
 
 static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
 	HSOCKET hsock = (HSOCKET)lpParam;
-	Reactor* reactor = hsock->factory->reactor;
 	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
 	if (LONGTRYLOCK(&timer_ctx->lock)) {
-		PostQueuedCompletionStatus(reactor->ComPort, 0, (ULONG_PTR)hsock, NULL);
+		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, NULL);
 	}
 }
 
@@ -881,7 +878,7 @@ static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 		return false;
 	}
 
-	CreateIoCompletionPort((HANDLE)IocpSock->fd, fc->reactor->ComPort, (ULONG_PTR)IocpSock, 0);
+	CreateIoCompletionPort((HANDLE)IocpSock->fd, CompletionPort, (ULONG_PTR)IocpSock, 0);
 	int fromlen = sizeof(IocpSock->peer_addr);
 	IocpBuff->type = READ;
 	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &(IocpBuff->flags), 
@@ -936,7 +933,7 @@ static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 	local_addr.sin6_family = AF_INET6;
 	socket_set_v6only(IocpSock->fd, 0);
 	bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr));
-	CreateIoCompletionPort((HANDLE)IocpSock->fd, fc->reactor->ComPort, (ULONG_PTR)IocpSock, 0);
+	CreateIoCompletionPort((HANDLE)IocpSock->fd, CompletionPort, (ULONG_PTR)IocpSock, 0);
 
 	PVOID lpSendBuffer = NULL;
 	DWORD dwSendDataLength = 0;

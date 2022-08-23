@@ -146,26 +146,6 @@ typedef struct _EPOLL_SOCKET
 }EPOLL_SOCKET, * HSOCKET;
 #endif // __WINDOWS__
 
-class Reactor
-{
-public:
-	Reactor() {};
-	~Reactor() {};
-
-public:
-	bool	Run = true;
-	int		CPU_COUNT = 1;
-#ifdef __WINDOWS__
-	HANDLE	ComPort = NULL;
-#else
-	int		eprfd = 0;
-	int		epwfd = 0;
-	int		eptfd = 0;
-	int 	maxevent = 64;
-#endif
-	std::map<uint16_t, BaseFactory*>	FactoryAll;
-};
-
 class BaseProtocol
 {
 public:
@@ -238,10 +218,9 @@ class BaseFactory
 public:
 	BaseFactory() {};
 	virtual ~BaseFactory() {};
-	void Set(Reactor* rec, const char* addr, uint16_t listenport) { this->reactor = rec, snprintf(this->ServerAddr, sizeof(this->ServerAddr), addr); this->ServerPort = listenport; };
+	void Set(const char* addr, uint16_t listenport) {snprintf(this->ServerAddr, sizeof(this->ServerAddr), addr); this->ServerPort = listenport; };
 
 public:
-	Reactor*	reactor = NULL;
 	char		ServerAddr[40] = { 0x0 };
 	uint16_t	ServerPort = 0;
 #ifdef __WINDOWS__
@@ -279,8 +258,7 @@ extern "C"
 {
 #endif
 
-	Reactor_API int		__STDCALL	ReactorStart(Reactor* reactor);
-	Reactor_API void	__STDCALL	ReactorStop(Reactor* reactor);
+	Reactor_API int		__STDCALL	ReactorStart();
 	Reactor_API int		__STDCALL	FactoryRun(BaseFactory* fc);
 	Reactor_API int		__STDCALL	FactoryStop(BaseFactory* fc);
 	Reactor_API HSOCKET __STDCALL	HsocketListenUDP(BaseProtocol* proto, int port);

@@ -50,15 +50,32 @@ public:
 	};
 };
 
+
+int  i = 0;
+static void user_callback(HSOCKET hsock, BaseProtocol* proto){
+	i++;
+	printf("%s:%d %d\n", __func__, __LINE__, i);
+	Sleep(2000);
+	if (i == 2){
+		printf("%s:%d 删除定时器1\n", __func__, __LINE__);
+		TimerDelete(hsock);
+		printf("%s:%d 删除定时器2\n", __func__, __LINE__);
+	}
+}
+
 int main()
 {
 	std::cout << "Hello World!\n";
-	Reactor* rct = new Reactor();
-	ReactorStart(rct);
+	ReactorStart();
 	EchoFactory* bfc = new EchoFactory();
 	//bfc->Set(rct, "0.0.0.0", 8000);  //仅ipv4
-	bfc->Set(rct, "::", 8000);		//ipv4、ipv6双协议栈
+	bfc->Set("::", 8000);		//ipv4、ipv6双协议栈
 	FactoryRun(bfc);
+
+	EchoProtocol* user = new EchoProtocol();
+	user->SetFactory(bfc, CLIENT_PROTOCOL);
+	TimerCreate(user, 0, 1000, user_callback);
+
 	while (true)
 	{
 #ifdef __WINDOWS__

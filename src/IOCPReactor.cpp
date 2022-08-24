@@ -661,12 +661,13 @@ static void do_connect(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 	do_close(IocpSock, IocpBuff, 0);
 }
 
-static void do_timer(HSOCKET hsock) {
-	BaseProtocol* proto = hsock->_user;
+static void do_timer(HSOCKET hsock, DWORD close) {
 	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
-	if (!timer_ctx->close) {
-		Timer_Callback callback = timer_ctx->call;
-		callback(hsock, proto);
+	if (!close) {
+		if (!timer_ctx->close) {
+			Timer_Callback callback = timer_ctx->call;
+			callback(hsock, hsock->_user);
+		}
 		LONGUNLOCK(&timer_ctx->lock);
 	}
 	else {
@@ -712,7 +713,7 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 		bRet = GetQueuedCompletionStatus(CompletionPort, &dwIoSize, (PULONG_PTR)&IocpSock, (LPOVERLAPPED*)&IocpBuff, INFINITE);
 		if (IocpBuff != NULL) IocpSock = IocpBuff->hsock;   //强制closesocket后可能返回错误的IocpSock，从IocpBuff中获取正确的IocpSock
 		else if (IocpSock->_conn_type == ITMER) {
-			do_timer(IocpSock);
+			do_timer(IocpSock, dwIoSize);
 			continue;
 		}
 		if (bRet == false){
@@ -835,8 +836,15 @@ int __STDCALL FactoryStop(BaseFactory* fc){
 static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
 	HSOCKET hsock = (HSOCKET)lpParam;
 	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
-	if (LONGTRYLOCK(&timer_ctx->lock)) {
-		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+	if (!timer_ctx->close) {
+		if (LONGTRYLOCK(&timer_ctx->lock)) {
+			PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+		}
+	}
+	else {
+		if (LONGTRYLOCK(&timer_ctx->lock)) {
+			PostQueuedCompletionStatus(CompletionPort, 1, (ULONG_PTR)hsock, NULL);
+		}
 	}
 }
 

@@ -39,6 +39,7 @@ typedef struct {
 	HANDLE timer;
 	Timer_Callback call;
 	long lock;
+	long close;
 }IOCP_TIMER, * HTIMER;
 
 static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len);
@@ -663,12 +664,13 @@ static void do_connect(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 static void do_timer(HSOCKET hsock) {
 	BaseProtocol* proto = hsock->_user;
 	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
-	Timer_Callback callback = timer_ctx->call;
-	callback(hsock, proto);
-	if (timer_ctx->timer) {
+	if (!timer_ctx->close) {
+		Timer_Callback callback = timer_ctx->call;
+		callback(hsock, proto);
 		LONGUNLOCK(&timer_ctx->lock);
 	}
 	else {
+		DeleteTimerQueueTimer(NULL, timer_ctx->timer, INVALID_HANDLE_VALUE);
 		free(timer_ctx);
 		ReleaseIOCP_Socket(hsock);
 	}
@@ -855,8 +857,7 @@ HSOCKET	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Ti
 
 void __STDCALL TimerDelete(HSOCKET hsock) {
 	HTIMER timer_ctx = (HTIMER)hsock->_user_data;
-	DeleteTimerQueueTimer(NULL, timer_ctx->timer, NULL);
-	timer_ctx->timer = NULL;
+	LONGLOCK(&timer_ctx->close);
 }
 
 static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int listen_port)

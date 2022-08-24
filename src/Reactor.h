@@ -149,6 +149,16 @@ typedef struct _EPOLL_SOCKET
 class BaseProtocol
 {
 public:
+	BaseFactory* factory = NULL;
+#ifdef __WINDOWS__
+	HANDLE			mutex = NULL;
+#else
+	std::mutex* mutex = NULL;
+#endif // __WINDOWS__
+	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
+	long			sockCount = 0;
+
+public:
 	BaseProtocol() { 
 		this->protoType = SERVER_PROTOCOL;
 #ifdef __WINDOWS__
@@ -195,16 +205,6 @@ public:
 		if (this->mutex) this->mutex->unlock();
 #endif
 	};
-
-public:
-	BaseFactory*	factory = NULL;
-#ifdef __WINDOWS__
-	HANDLE			mutex = NULL;
-#else
-	std::mutex*		mutex = NULL;
-#endif // __WINDOWS__
-	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
-	long			sockCount = 0;
 
 public:
 	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;

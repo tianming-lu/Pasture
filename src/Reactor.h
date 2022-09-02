@@ -90,7 +90,7 @@ class BaseFactory;
 class BaseProtocol;
 
 #ifdef __WINDOWS__
-typedef struct _IOCP_SOCKET* HSOCKET;
+typedef struct _SOCKET_CTX* HSOCKET;
 #else
 typedef struct _EPOLL_SOCKET* HSOCKET;
 #endif
@@ -98,17 +98,15 @@ typedef struct _EPOLL_SOCKET* HSOCKET;
 typedef void (*Timer_Callback) (HSOCKET, BaseProtocol*);
 
 #ifdef __WINDOWS__
-typedef struct _IOCP_BUFF
+typedef struct _BUFF_CTX
 {
 	OVERLAPPED	overlapped;
 	WSABUF		databuf;
 	int32_t		offset;
 	int32_t		size;
 	BYTE		type;
-	SOCKET		fd;
-	DWORD		flags;
-	struct _IOCP_SOCKET* hsock;
-}IOCP_BUFF, *HNETBUFF;
+	struct _SOCKET_CTX* hsock;
+}BUFF_CTX, *HBUFF;
 #else
 typedef struct _EPOLL_BUFF
 {
@@ -120,7 +118,7 @@ typedef struct _EPOLL_BUFF
 #endif
 
 #ifdef __WINDOWS__
-typedef struct _IOCP_SOCKET
+typedef struct _SOCKET_CTX
 {
 	SOCKET			fd;
 #else
@@ -128,15 +126,15 @@ typedef struct _EPOLL_SOCKET
 {
 	int				fd;
 #endif
+	CONN_TYPE				_conn_type;
 	struct sockaddr_in6		peer_addr;
 	BaseFactory*			factory;
 	BaseProtocol*			_user;
 	void*					_user_data;
-	CONN_TYPE				_conn_type;
 #ifdef __WINDOWS__
 	char*			recv_buf;
-	IOCP_BUFF*		_IocpBuff;
-}IOCP_SOCKET, * HSOCKET;
+	BUFF_CTX*		_IocpBuff;
+}SOCKET_CTX, * HSOCKET;
 #else
 	uint8_t			_stat;
 	EPOLL_BUFF		_recv_buf;
@@ -145,6 +143,8 @@ typedef struct _EPOLL_SOCKET
 	Timer_Callback  _callback;
 }EPOLL_SOCKET, * HSOCKET;
 #endif // __WINDOWS__
+
+#define SOCKET_CTX_SIZE sizeof(SOCKET_CTX)
 
 class BaseProtocol
 {
@@ -269,9 +269,9 @@ extern "C"
 	Reactor_API void 	__STDCALL	HsocketClosed(HSOCKET hsock);
 	Reactor_API int		__STDCALL	HsocketPopBuf(HSOCKET hsock, int len);
 
-	Reactor_API	HNETBUFF	__STDCALL	HsocketGetBuff();
-	Reactor_API	bool		__STDCALL	HsocketSetBuff(HNETBUFF netbuff, const char* data, int len);
-	Reactor_API	bool		__STDCALL	HsocketSendBuff(HSOCKET hsock, HNETBUFF netbuff);
+	Reactor_API	HBUFF	__STDCALL	HsocketGetBuff();
+	Reactor_API	bool		__STDCALL	HsocketSetBuff(HBUFF netbuff, const char* data, int len);
+	Reactor_API	bool		__STDCALL	HsocketSendBuff(HSOCKET hsock, HBUFF netbuff);
 
 	Reactor_API void	__STDCALL	HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port);
 	Reactor_API void	__STDCALL	HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz);

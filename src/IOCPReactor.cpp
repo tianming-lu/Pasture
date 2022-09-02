@@ -34,6 +34,7 @@ std::map<uint16_t, BaseFactory*> Factorys;
 
 static LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 static LPFN_CONNECTEX lpfnConnectEx = NULL;
+static DWORD WSA_RECV_FLAGS = 0;
 
 typedef struct {
 	HANDLE timer;
@@ -42,7 +43,7 @@ typedef struct {
 	long close;
 }IOCP_TIMER, * HTIMER;
 
-static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len);
+static bool HsocketSendEx(SOCKET_CTX* IocpSock, const char* data, int len);
 
 #ifdef OPENSSL_SUPPORT
 #include <openssl/ssl.h>
@@ -110,13 +111,13 @@ static inline IUINT32 iclock(){
 }
 #endif
 
-static inline IOCP_SOCKET* NewIOCP_Socket(){
-	HSOCKET hsock = (HSOCKET)malloc(sizeof(IOCP_SOCKET));
-	if (hsock) {memset(hsock, 0x0, sizeof(IOCP_SOCKET));}
+static inline SOCKET_CTX* New_Socket_Ctx(){
+	HSOCKET hsock = (HSOCKET)malloc(sizeof(SOCKET_CTX));
+	if (hsock) {memset(hsock, 0x0, sizeof(SOCKET_CTX));}
 	return hsock;
 }
 
-static inline void ReleaseIOCP_Socket(IOCP_SOCKET* IocpSock){
+static inline void Release_Socket_Ctx(SOCKET_CTX* IocpSock){
 #ifdef OPENSSL_SUPPORT
 	if (IocpSock->_conn_type == SSL_CONN){
 		struct SSL_Content* ssl_ctx = (struct SSL_Content*)IocpSock->_user_data;
@@ -141,13 +142,13 @@ static inline void ReleaseIOCP_Socket(IOCP_SOCKET* IocpSock){
 	free(IocpSock);
 }
 
-static inline IOCP_BUFF* NewIOCP_Buff(){
-	IOCP_BUFF* buff = (IOCP_BUFF*)malloc(sizeof(IOCP_BUFF));
-	if (buff) { memset(buff, 0x0, sizeof(IOCP_BUFF)); }
+static inline BUFF_CTX* New_Buff_Ctx(){
+	BUFF_CTX* buff = (BUFF_CTX*)malloc(sizeof(BUFF_CTX));
+	if (buff) { memset(buff, 0x0, sizeof(BUFF_CTX)); }
 	return buff;
 }
 
-static inline void ReleaseIOCP_Buff(IOCP_BUFF* buff){
+static inline void Release_Buff_Ctx(BUFF_CTX* buff){
 	free(buff);
 }
 
@@ -204,45 +205,58 @@ static inline void hsocket_set_keepalive(SOCKET fd) {  //这个函数使用有�
 	}
 }
 
-static inline void PostAcceptClient(IOCP_SOCKET* IocpSock){
-	BaseFactory* fc = IocpSock->factory;
+static inline void PostAcceptClient(BaseFactory* factroy){
+	SOCKET_CTX* IocpSock = New_Socket_Ctx();
+	if (!IocpSock) return;
+	IocpSock->_user = factroy->CreateProtocol();
+	if (!IocpSock->_user) { Release_Socket_Ctx(IocpSock); return; }
+	IocpSock->factory = factroy;
 
-	IOCP_BUFF* IocpBuff;
-	IocpBuff = NewIOCP_Buff();
+	BUFF_CTX* IocpBuff;
+	IocpBuff = New_Buff_Ctx();
 	if (IocpBuff == NULL){
+		factroy->DeleteProtocol(IocpSock->_user);
+		Release_Socket_Ctx(IocpSock);
 		return;
 	}
 	IocpBuff->databuf.buf = (char*)malloc(DATA_BUFSIZE);
 	if (IocpBuff->databuf.buf == NULL){
-		ReleaseIOCP_Buff(IocpBuff);
+		factroy->DeleteProtocol(IocpSock->_user);
+		Release_Buff_Ctx(IocpBuff);
+		Release_Socket_Ctx(IocpSock);
 		return;
 	}
 	IocpBuff->databuf.len = DATA_BUFSIZE;
+	IocpBuff->size = DATA_BUFSIZE;
 	IocpBuff->type = ACCEPT;
 	IocpBuff->hsock = IocpSock;
-
-	IocpBuff->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
-	if (IocpBuff->fd == INVALID_SOCKET){
-		ReleaseIOCP_Buff(IocpBuff);
+	IocpSock->recv_buf = IocpBuff->databuf.buf;
+	IocpSock->_IocpBuff = IocpBuff;
+	IocpSock->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+	if (IocpSock->fd == INVALID_SOCKET){
+		factroy->DeleteProtocol(IocpSock->_user);
+		free(IocpSock->recv_buf);
+		Release_Buff_Ctx(IocpBuff);
+		Release_Socket_Ctx(IocpSock);
 		return;
 	}
 
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
-	bool rc = lpfnAcceptEx(fc->Listenfd, IocpBuff->fd,
+	bool rc = lpfnAcceptEx(factroy->Listenfd, IocpSock->fd,
 		IocpBuff->databuf.buf, 0,
 		sizeof(struct sockaddr_in6) + 16, sizeof(struct sockaddr_in6) + 16,
 		&IocpBuff->databuf.len, &(IocpBuff->overlapped));
 
 	if (false == rc){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
-			ReleaseIOCP_Buff(IocpBuff);
+			Release_Buff_Ctx(IocpBuff);
 			return;
 		}
 	}
 	return;
 }
 
-static inline void CloseSocket(IOCP_SOCKET* IocpSock){
+static inline void CloseSocket(SOCKET_CTX* IocpSock){
 	SOCKET fd = InterlockedExchange(&IocpSock->fd, INVALID_SOCKET);
 	if (fd != INVALID_SOCKET && fd != NULL){
 		//CancelIo((HANDLE)fd);	//取消等待执行的异步操作
@@ -256,18 +270,18 @@ static inline void AutoProtocolFree(BaseProtocol* proto) {
 	func(autoproto);
 }
 
-static void do_close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int err){
+static void do_close(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff, int err){
 	switch (IocpBuff->type){
 	case ACCEPT:
 		if (IocpBuff->databuf.buf)
 			free(IocpBuff->databuf.buf);
-		ReleaseIOCP_Buff(IocpBuff);
-		PostAcceptClient(IocpSock);
+		Release_Buff_Ctx(IocpBuff);
+		PostAcceptClient(IocpSock->factory);
 		return;
 	case WRITE:
 		if (IocpBuff->databuf.buf != NULL)
 			free(IocpBuff->databuf.buf);
-		ReleaseIOCP_Buff(IocpBuff);
+		Release_Buff_Ctx(IocpBuff);
 		return;
 	default:
 		break;
@@ -300,11 +314,11 @@ static void do_close(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int err){
 	}
 	CloseSocket(IocpSock);
 	if (IocpSock->recv_buf) free(IocpSock->recv_buf);
-	ReleaseIOCP_Buff(IocpBuff);
-	ReleaseIOCP_Socket(IocpSock);
+	Release_Buff_Ctx(IocpBuff);
+	Release_Socket_Ctx(IocpSock);
 }
 
-static bool ResetIocp_Buff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
+static bool ResetIocp_Buff(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
 	memset(&IocpBuff->overlapped, 0, sizeof(OVERLAPPED));
 	if (IocpSock->recv_buf == NULL){
 		if (IocpBuff->databuf.buf != NULL){
@@ -328,9 +342,9 @@ static bool ResetIocp_Buff(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 	return true;
 }
 
-static inline void PostRecvUDP(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
+static inline void PostRecvUDP(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
 	int fromlen = sizeof(IocpSock->peer_addr);
-	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &(IocpBuff->flags), 
+	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &WSA_RECV_FLAGS,
 		(struct sockaddr*)&IocpSock->peer_addr, &fromlen, &IocpBuff->overlapped, NULL)){
 		int err = WSAGetLastError();
 		if (ERROR_IO_PENDING != err){
@@ -339,8 +353,8 @@ static inline void PostRecvUDP(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 	}
 }
 
-static inline void PostRecvTCP(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
-	if (SOCKET_ERROR == WSARecv(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &(IocpBuff->flags), &IocpBuff->overlapped, NULL)){
+static inline void PostRecvTCP(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
+	if (SOCKET_ERROR == WSARecv(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &WSA_RECV_FLAGS, &IocpBuff->overlapped, NULL)){
 		int err = WSAGetLastError();
 		if (ERROR_IO_PENDING != err){
 			do_close(IocpSock, IocpBuff, err);
@@ -348,7 +362,7 @@ static inline void PostRecvTCP(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 	}
 }
 
-static void PostRecv(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
+static void PostRecv(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
 	IocpBuff->type = READ;
 	if (ResetIocp_Buff(IocpSock, IocpBuff) == false){
 		return do_close(IocpSock, IocpBuff, 14);
@@ -359,29 +373,17 @@ static void PostRecv(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 	
 }
 
-static void do_aceept(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff){
-	PostAcceptClient(IocpListenSock);
+static void do_aceept(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
+	BaseFactory* factory = IocpSock->factory;
+	PostAcceptClient(factory);
 
-	BaseFactory* fc = IocpListenSock->factory;
 	//连接成功后刷新套接字属性
-	setsockopt(IocpBuff->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*) & (IocpListenSock->fd), sizeof(IocpListenSock->fd));
-
-	IOCP_SOCKET* IocpSock = NewIOCP_Socket();
-	if (IocpSock == NULL){
-		return do_close(IocpListenSock, IocpBuff, 14);
-	}
-	IocpSock->fd = IocpBuff->fd;
+	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(factory->Listenfd), sizeof(factory->Listenfd));
 	//hsocket_set_keepalive(IocpSock->fd);
 
-	BaseProtocol* proto = fc->CreateProtocol();	//用户指针
-	if (proto == NULL){
-		return do_close(IocpListenSock, IocpBuff, 14);
-	}
-	proto->SetFactory(fc, SERVER_PROTOCOL);
-	IocpSock->factory = fc;
-	IocpSock->_user = proto;	//用户指针
-	IocpSock->_IocpBuff = IocpBuff;
-	IocpBuff->hsock = IocpSock;
+	IocpSock->_user_data = NULL;
+	BaseProtocol* proto = IocpSock->_user;
+	if (!proto->factory) proto->SetFactory(factory, SERVER_PROTOCOL);
 
 	int nSize = sizeof(IocpSock->peer_addr);
 	getpeername(IocpSock->fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
@@ -396,7 +398,7 @@ static void do_aceept(IOCP_SOCKET* IocpListenSock, IOCP_BUFF* IocpBuff){
 }
 
 #ifdef KCP_SUPPORT
-static void do_read_kcp(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
+static void do_read_kcp(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
 	Kcp_Content* ctx = (Kcp_Content*)(IocpSock->_user_data);
 	LONGLOCK(&ctx->lock);
 	ikcp_input(ctx->kcp, IocpSock->recv_buf, IocpBuff->offset);
@@ -441,7 +443,7 @@ static void do_read_kcp(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 #endif
 
 #ifdef OPENSSL_SUPPORT
-static void ssl_do_write(struct SSL_Content* ssl_ctx, IOCP_SOCKET* IocpSock) {
+static void ssl_do_write(struct SSL_Content* ssl_ctx, SOCKET_CTX* IocpSock) {
 	while (1) {
 		int left = ssl_ctx->wsize - ssl_ctx->woffset;
 		if (left == 0) {
@@ -460,7 +462,7 @@ static void ssl_do_write(struct SSL_Content* ssl_ctx, IOCP_SOCKET* IocpSock) {
 	ssl_ctx->woffset = 0;
 }
 
-static void ssl_do_handshake(struct SSL_Content* ssl_ctx, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+static void ssl_do_handshake(struct SSL_Content* ssl_ctx, SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff) {
 	BIO_write(ssl_ctx->rbio, IocpSock->recv_buf, IocpBuff->offset);
 	IocpBuff->offset = 0;
 	int r = SSL_do_handshake(ssl_ctx->ssl);
@@ -495,7 +497,7 @@ static void ssl_do_handshake(struct SSL_Content* ssl_ctx, IOCP_SOCKET* IocpSock,
 	}
 }
 
-static void do_read_ssl(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+static void do_read_ssl(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff) {
 	struct SSL_Content* ssl_ctx = (struct SSL_Content*)IocpSock->_user_data;
 	if (SSL_is_init_finished(ssl_ctx->ssl)) {
 		BIO_write(ssl_ctx->rbio, IocpSock->recv_buf, IocpBuff->offset);
@@ -544,7 +546,7 @@ static void do_read_ssl(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 }
 #endif
 
-static void do_read_tcp_and_udp(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+static void do_read_tcp_and_udp(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff) {
 	BaseProtocol* proto = IocpSock->_user;
 	if (IocpSock->fd != INVALID_SOCKET) {
 		proto->Lock();
@@ -559,7 +561,7 @@ static void do_read_tcp_and_udp(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 	do_close(IocpSock, IocpBuff, 0);
 }
 
-static void do_read(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+static void do_read(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff) {
 	switch (IocpSock->_conn_type) {
 	case TCP_CONN:
 	case UDP_CONN:
@@ -578,7 +580,7 @@ static void do_read(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
 }
 
 #ifdef OPENSSL_SUPPORT
-static bool Hsocket_SSL_init(IOCP_SOCKET* IocpSock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key) {
+static bool Hsocket_SSL_init(SOCKET_CTX* IocpSock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key) {
 	struct SSL_Content* ssl_ctx = (SSL_Content*)malloc(sizeof(struct SSL_Content));
 	if (!ssl_ctx) return false;
 	memset(ssl_ctx, 0x0, sizeof(SSL_Content));
@@ -632,14 +634,14 @@ static bool Hsocket_SSL_init(IOCP_SOCKET* IocpSock, int openssl_type, const char
 	return true;
 }
 
-static void Hsocket_upto_SSL_Client(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+static void Hsocket_upto_SSL_Client(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff) {
 	if (!Hsocket_SSL_init(IocpSock, OPENSSL_CLIENT, NULL, NULL, NULL))
 		return do_close(IocpSock, IocpBuff, 0);
 	PostRecv(IocpSock, IocpBuff);
 }
 #endif
 
-static void do_connect(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff) {
+static void do_connect(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff) {
 	//hsocket_set_keepalive(IocpSock->fd);
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);  //连接成功后刷新套接字属性
 #ifdef OPENSSL_SUPPORT
@@ -673,11 +675,11 @@ static void do_timer(HSOCKET hsock, DWORD close) {
 	else {
 		DeleteTimerQueueTimer(NULL, timer_ctx->timer, INVALID_HANDLE_VALUE);
 		free(timer_ctx);
-		ReleaseIOCP_Socket(hsock);
+		Release_Socket_Ctx(hsock);
 	}
 }
 
-static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
+static void ProcessIO(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
 	switch (IocpBuff->type){
 	case READ:
 		do_read(IocpSock, IocpBuff);
@@ -700,8 +702,8 @@ static void ProcessIO(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 //服务线程
 DWORD WINAPI serverWorkerThread(LPVOID pParam){
 	DWORD	dwIoSize = 0;
-	IOCP_SOCKET* IocpSock = NULL;
-	IOCP_BUFF* IocpBuff = NULL;		//IO数据,用于发起接收重叠操作
+	SOCKET_CTX* IocpSock = NULL;
+	BUFF_CTX* IocpBuff = NULL;		//IO数据,用于发起接收重叠操作
 	bool bRet = false;
 	DWORD err = 0;
 	while (true){
@@ -806,17 +808,9 @@ int __STDCALL FactoryRun(BaseFactory* fc){
 		fc->Listenfd = get_listen_sock(fc->ServerAddr, fc->ServerPort);
 		if (fc->Listenfd == SOCKET_ERROR) return -2;
 
-		IOCP_SOCKET* IcpSock = NewIOCP_Socket();
-		if (IcpSock == NULL){
-			closesocket(fc->Listenfd);
-			return -3;
-		}
-		IcpSock->factory = fc;
-		IcpSock->fd = fc->Listenfd;
-
-		CreateIoCompletionPort((HANDLE)fc->Listenfd, CompletionPort, (ULONG_PTR)IcpSock, 0);
+		CreateIoCompletionPort((HANDLE)fc->Listenfd, CompletionPort, (ULONG_PTR)0, 0);
 		for (DWORD i = 0; i < CompletionPortWorker; i++)
-			PostAcceptClient(IcpSock);
+			PostAcceptClient(fc);
 	}
 	fc->FactoryInited();
 	Factorys.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
@@ -850,7 +844,7 @@ static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
 
 HSOCKET	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback) {
 	BaseFactory* factory = proto->factory;
-	HSOCKET hsock = NewIOCP_Socket();
+	HSOCKET hsock = New_Socket_Ctx();
 	hsock->_conn_type = ITMER;
 	hsock->factory = factory;
 	hsock->_user = proto;
@@ -868,11 +862,10 @@ void __STDCALL TimerDelete(HSOCKET hsock) {
 	LONGLOCK(&timer_ctx->close);
 }
 
-static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, int listen_port)
+static bool IOCPConnectUDP(BaseFactory* fc, SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff, int listen_port)
 {
 	IocpSock->fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (IocpSock->fd == INVALID_SOCKET) return false;
-	IocpBuff->fd = IocpSock->fd;
 
 	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
@@ -890,7 +883,7 @@ static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, CompletionPort, (ULONG_PTR)IocpSock, 0);
 	int fromlen = sizeof(IocpSock->peer_addr);
 	IocpBuff->type = READ;
-	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &(IocpBuff->flags), 
+	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpBuff->databuf, 1, NULL, &WSA_RECV_FLAGS,
 		(struct sockaddr*)&IocpSock->peer_addr, &fromlen, &IocpBuff->overlapped, NULL)){
 		if (ERROR_IO_PENDING != WSAGetLastError()){
 			closesocket(IocpSock->fd);
@@ -903,12 +896,12 @@ static bool IOCPConnectUDP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
 	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) return NULL;
 	BaseFactory* fc = proto->factory;
-	IOCP_SOCKET* IocpSock = NewIOCP_Socket();
+	SOCKET_CTX* IocpSock = New_Socket_Ctx();
 	if (IocpSock == NULL) return NULL; 
 
-	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
+	BUFF_CTX* IocpBuff = New_Buff_Ctx();
 	if (IocpBuff == NULL){
-		ReleaseIOCP_Socket(IocpSock);
+		Release_Socket_Ctx(IocpSock);
 		return NULL;
 	}
 	IocpBuff->type = CONNECT;
@@ -925,18 +918,17 @@ HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
 	bool ret = false;
 	ret = IOCPConnectUDP(fc, IocpSock, IocpBuff, port);   //UDP连接
 	if (ret == false){
-		ReleaseIOCP_Buff(IocpBuff);
-		ReleaseIOCP_Socket(IocpSock);
+		Release_Buff_Ctx(IocpBuff);
+		Release_Socket_Ctx(IocpSock);
 		return NULL;
 	}
 	InterlockedIncrement(&proto->sockCount);
 	return 0;
 }
 
-static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
+static bool IOCPConnectTCP(BaseFactory* fc, SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
 	IocpSock->fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if (IocpSock->fd == INVALID_SOCKET) return false;
-	IocpBuff->fd = IocpSock->fd;
 	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin6_family = AF_INET6;
@@ -966,12 +958,12 @@ static bool IOCPConnectTCP(BaseFactory* fc, IOCP_SOCKET* IocpSock, IOCP_BUFF* Io
 HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE conntype){
 	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) return NULL;
 	BaseFactory* fc = proto->factory;
-	IOCP_SOCKET* IocpSock = NewIOCP_Socket();
+	SOCKET_CTX* IocpSock = New_Socket_Ctx();
 	if (IocpSock == NULL) return NULL;
 
-	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
+	BUFF_CTX* IocpBuff = New_Buff_Ctx();
 	if (IocpBuff == NULL){
-		ReleaseIOCP_Socket(IocpSock);
+		Release_Socket_Ctx(IocpSock);
 		return NULL;
 	}
 	IocpBuff->type = CONNECT;
@@ -994,20 +986,20 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 	else if (conntype == UDP_CONN || conntype == KCP_CONN)
 		ret = IOCPConnectUDP(fc, IocpSock, IocpBuff, 0);   //UDP连接
 	else {
-		ReleaseIOCP_Buff(IocpBuff);
-		ReleaseIOCP_Socket(IocpSock);
+		Release_Buff_Ctx(IocpBuff);
+		Release_Socket_Ctx(IocpSock);
 		return NULL;
 	}
 	if (ret == false){
-		ReleaseIOCP_Buff(IocpBuff);
-		ReleaseIOCP_Socket(IocpSock);
+		Release_Buff_Ctx(IocpBuff);
+		Release_Socket_Ctx(IocpSock);
 		return NULL;
 	}
 	InterlockedIncrement(&proto->sockCount);
 	return IocpSock;
 }
 
-static bool IOCPPostSendUDPEx(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, struct sockaddr* addr, int addrlen){
+static bool IOCPPostSendUDPEx(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff, struct sockaddr* addr, int addrlen){
 	if (SOCKET_ERROR == WSASendTo(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, addr, addrlen, &IocpBuff->overlapped, NULL)){
 		if (ERROR_IO_PENDING != WSAGetLastError())
 			return false;
@@ -1015,7 +1007,7 @@ static bool IOCPPostSendUDPEx(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff, struct
 	return true;
 }
 
-static bool IOCPPostSendTCPEx(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
+static bool IOCPPostSendTCPEx(SOCKET_CTX* IocpSock, BUFF_CTX* IocpBuff){
 	if (SOCKET_ERROR == WSASend(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, &IocpBuff->overlapped, NULL)){
 		if (ERROR_IO_PENDING != WSAGetLastError())
 			return false;
@@ -1023,13 +1015,13 @@ static bool IOCPPostSendTCPEx(IOCP_SOCKET* IocpSock, IOCP_BUFF* IocpBuff){
 	return true;
 }
 
-static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len){
-	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
+static bool HsocketSendEx(SOCKET_CTX* IocpSock, const char* data, int len){
+	BUFF_CTX* IocpBuff = New_Buff_Ctx();
 	if (IocpBuff == NULL) return false;
 
 	IocpBuff->databuf.buf = (char*)malloc(len);
 	if (IocpBuff->databuf.buf == NULL){
-		ReleaseIOCP_Buff(IocpBuff);
+		Release_Buff_Ctx(IocpBuff);
 		return false;
 	}
 	memcpy(IocpBuff->databuf.buf, data, len);
@@ -1044,7 +1036,7 @@ static bool HsocketSendEx(IOCP_SOCKET* IocpSock, const char* data, int len){
 		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr));
 	if (ret == false){
 		free(IocpBuff->databuf.buf);
-		ReleaseIOCP_Buff(IocpBuff);
+		Release_Buff_Ctx(IocpBuff);
 		return false;
 	}
 	return true;
@@ -1094,12 +1086,12 @@ bool __STDCALL HsocketSend(HSOCKET hsock, const char* data, int len) {
 
 bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len) {
 	if (hsock->_conn_type == UDP_CONN){
-		IOCP_BUFF* IocpBuff = NewIOCP_Buff();
+		BUFF_CTX* IocpBuff = New_Buff_Ctx();
 		if (IocpBuff == NULL) return false;
 
 		IocpBuff->databuf.buf = (char*)malloc(len);
 		if (IocpBuff->databuf.buf == NULL) {
-			ReleaseIOCP_Buff(IocpBuff);
+			Release_Buff_Ctx(IocpBuff);
 			return false;
 		}
 		memcpy(IocpBuff->databuf.buf, data, len);
@@ -1117,7 +1109,7 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 		bool ret = IOCPPostSendUDPEx(hsock, IocpBuff, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 		if (ret == false) {
 			free(IocpBuff->databuf.buf);
-			ReleaseIOCP_Buff(IocpBuff);
+			Release_Buff_Ctx(IocpBuff);
 			return false;
 		}
 		return true;
@@ -1125,17 +1117,17 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 	return false;
 }
 
-IOCP_BUFF* __STDCALL HsocketGetBuff(){
-	IOCP_BUFF* IocpBuff = NewIOCP_Buff();
+BUFF_CTX* __STDCALL HsocketGetBuff(){
+	BUFF_CTX* IocpBuff = New_Buff_Ctx();
 	if (IocpBuff){
 		IocpBuff->databuf.buf = (char*)malloc(DATA_BUFSIZE);
 		if (IocpBuff->databuf.buf) { IocpBuff->size = DATA_BUFSIZE; }
-		else { ReleaseIOCP_Buff(IocpBuff); return NULL; }	
+		else { Release_Buff_Ctx(IocpBuff); return NULL; }	
 	}
 	return IocpBuff;
 }
 
-bool __STDCALL HsocketSetBuff(HNETBUFF netbuff, const char* data, int len){
+bool __STDCALL HsocketSetBuff(HBUFF netbuff, const char* data, int len){
 	if (netbuff == NULL) return false;
 	int left = netbuff->size - netbuff->offset;
 	if (left >= len){
@@ -1157,7 +1149,7 @@ bool __STDCALL HsocketSetBuff(HNETBUFF netbuff, const char* data, int len){
 	return true;
 }
 
-bool __STDCALL HsocketSendBuff(HSOCKET hsock, HNETBUFF netbuff){
+bool __STDCALL HsocketSendBuff(HSOCKET hsock, HBUFF netbuff){
 	if (netbuff == NULL || hsock == NULL) return false;
 	memset(&netbuff->overlapped, 0, sizeof(OVERLAPPED));
 	netbuff->type = WRITE;
@@ -1167,7 +1159,7 @@ bool __STDCALL HsocketSendBuff(HSOCKET hsock, HNETBUFF netbuff){
 	else ret = IOCPPostSendUDPEx(hsock, netbuff, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 	if (ret == false){
 		free(netbuff->databuf.buf);
-		ReleaseIOCP_Buff(netbuff);
+		Release_Buff_Ctx(netbuff);
 		return false;
 	}
 	return true;
@@ -1196,7 +1188,7 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 	switch (hsock->_conn_type) {
 	case TCP_CONN:
 	case UDP_CONN:{
-		IOCP_BUFF* IocpBuff = hsock->_IocpBuff;
+		BUFF_CTX* IocpBuff = hsock->_IocpBuff;
 		IocpBuff->offset -= len;
 		memmove(hsock->recv_buf, hsock->recv_buf + len, IocpBuff->offset);
 		return IocpBuff->offset;

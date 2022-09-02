@@ -714,7 +714,7 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 		err = 0;
 		bRet = GetQueuedCompletionStatus(CompletionPort, &dwIoSize, (PULONG_PTR)&IocpSock, (LPOVERLAPPED*)&IocpBuff, INFINITE);
 		if (IocpBuff != NULL) IocpSock = IocpBuff->hsock;   //强制closesocket后可能返回错误的IocpSock，从IocpBuff中获取正确的IocpSock
-		else if (IocpSock->_conn_type == ITMER) {
+		else if (IocpSock->_conn_type == TIMER) {
 			do_timer(IocpSock, dwIoSize);
 			continue;
 		}
@@ -845,7 +845,7 @@ static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
 HSOCKET	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback) {
 	BaseFactory* factory = proto->factory;
 	HSOCKET hsock = New_Socket_Ctx();
-	hsock->_conn_type = ITMER;
+	hsock->_conn_type = TIMER;
 	hsock->factory = factory;
 	hsock->_user = proto;
 	HTIMER timer_ctx = (HTIMER)malloc(sizeof(IOCP_TIMER));
@@ -970,7 +970,7 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 	IocpBuff->hsock = IocpSock;
 
 	IocpSock->factory = fc;
-	IocpSock->_conn_type = conntype > ITMER ? TCP_CONN: conntype;
+	IocpSock->_conn_type = conntype > TIMER ? TCP_CONN: conntype;
 	IocpSock->_user = proto;
 	IocpSock->_IocpBuff = IocpBuff;
 	IocpSock->peer_addr.sin6_family = AF_INET6;

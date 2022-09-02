@@ -85,10 +85,10 @@ static inline IUINT32 iclock(){
 #endif
 
 static HSOCKET new_hsockt(){
-	HSOCKET hsock = (HSOCKET)malloc(sizeof(EPOLL_SOCKET));
+	HSOCKET hsock = (HSOCKET)malloc(sizeof(SOCKET_CTX));
 	if (hsock == NULL) return NULL;
-	memset(hsock, 0, sizeof(EPOLL_SOCKET));
-	EPOLL_BUFF *rbuf = &hsock->_recv_buf;
+	memset(hsock, 0, sizeof(SOCKET_CTX));
+	BUFF_CTX *rbuf = &hsock->_recv_buf;
 	rbuf->buff = (char*)malloc(DATA_BUFSIZE);
 	if (rbuf->buff == NULL){
 		free(hsock);
@@ -120,8 +120,10 @@ static void release_hsock(HSOCKET hsock){
 			free(ctx);
 		}
 #endif
-		if (hsock->_recv_buf.buff) free(hsock->_recv_buf.buff);
-		if (hsock->_send_buf.buff) free(hsock->_send_buf.buff);
+		if (hsock->_conn_type != TIMER){
+			if (hsock->_recv_buf.buff) free(hsock->_recv_buf.buff);
+			if (hsock->_send_buf.buff) free(hsock->_send_buf.buff);
+		}
 		free(hsock);
 	}
 }
@@ -428,7 +430,7 @@ static int do_read_ssl(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 	char* buf = NULL;
 	size_t buflen = 0;
 	ssize_t n = 0;
-	EPOLL_BUFF* rbuf = &hsock->_recv_buf;
+	BUFF_CTX* rbuf = &hsock->_recv_buf;
 	while (1){
 		buf = rbuf->buff + rbuf->offset;
 		buflen = rbuf->size - rbuf->offset;
@@ -462,7 +464,7 @@ static int do_read_tcp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 	char* buf = NULL;
 	size_t buflen = 0;
 	ssize_t n = 0;
-	EPOLL_BUFF* rbuf = &hsock->_recv_buf;
+	BUFF_CTX* rbuf = &hsock->_recv_buf;
 	while (1){
 		buf = rbuf->buff + rbuf->offset;
 		buflen = rbuf->size - rbuf->offset;
@@ -496,7 +498,7 @@ static int do_read_tcp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 }
 
 #ifdef KCP_SUPPORT
-static int do_read_kcp(HSOCKET hsock, EPOLL_BUFF* rbuf, BaseFactory* fc, BaseProtocol* proto){
+static int do_read_kcp(HSOCKET hsock, BUFF_CTX* rbuf, BaseFactory* fc, BaseProtocol* proto){
 	Kcp_Content* ctx = (Kcp_Content*)(hsock->_user_data);
 	LONGLOCK(&ctx->lock);
 	ikcp_input(ctx->kcp, rbuf->buff, rbuf->offset);
@@ -540,7 +542,7 @@ static int do_read_udp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 	char* buf = NULL;
 	size_t buflen = 0;
 	int addr_len=sizeof(hsock->peer_addr);
-	EPOLL_BUFF* rbuf = &hsock->_recv_buf;
+	BUFF_CTX* rbuf = &hsock->_recv_buf;
 
 	int n, ret = -1;
 	while (1){
@@ -583,16 +585,18 @@ static int do_read_udp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 }
 
 static void do_read(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
-	EPOLL_BUFF *rbuf = &hsock->_recv_buf;
+	BUFF_CTX *rbuf = &hsock->_recv_buf;
 	int ret = 0;
 	switch (hsock->_conn_type)
 	{
 	case TCP_CONN:
 		ret = do_read_tcp(hsock, fc, proto);
 		break;
+#ifdef OPENSSL_SUPPORT
 	case SSL_CONN:
 		ret = do_read_ssl(hsock, fc, proto);
 		break;
+#endif
 	case UDP_CONN:
 	case KCP_CONN:
 		ret = do_read_udp(hsock, fc, proto);
@@ -680,7 +684,7 @@ static void read_work_thread(void* args){
 
 static void do_write_udp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 	socklen_t socklen = sizeof(hsock->peer_addr);
-	EPOLL_BUFF *sbuf = &hsock->_send_buf;
+	BUFF_CTX *sbuf = &hsock->_send_buf;
 	if (__sync_fetch_and_or(&sbuf->lock_flag, 1)) return;
 	int slen = 0;
 	int len;
@@ -710,7 +714,7 @@ static void do_write_udp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
 }
 
 static void do_write_tcp(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto){
-	EPOLL_BUFF *sbuf = &hsock->_send_buf;
+	BUFF_CTX *sbuf = &hsock->_send_buf;
 	//while (__sync_fetch_and_or(&sbuf->lock_flag, 1)) usleep(0);
 	if (__sync_fetch_and_or(&sbuf->lock_flag, 1)) return;
 
@@ -744,7 +748,7 @@ static void do_write_ssl(HSOCKET hsock, BaseFactory* fc, BaseProtocol* proto)
 		do_write_tcp(hsock, fc, proto);
 		return;
 	}
-	EPOLL_BUFF *sbuf = &hsock->_send_buf;
+	BUFF_CTX *sbuf = &hsock->_send_buf;
 	if (__sync_fetch_and_or(&sbuf->lock_flag, 1)) return;
 
 	char* data = sbuf->buff;
@@ -1085,7 +1089,7 @@ HSOCKET TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callba
         return NULL;
     }
 	hsock->fd = tfd;
-	hsock->_conn_type = ITMER;
+	hsock->_conn_type = TIMER;
 	hsock->_callback = callback;
 	hsock->_user = proto;
 	hsock->factory = proto->factory;
@@ -1110,7 +1114,7 @@ static void HsocketSendUdp(HSOCKET hsock, const char* data, int len)
 {
 	//socklen_t socklen = sizeof(hsock->peer_addr);
 	//sendto(hsock->fd, data, len, 0, (struct sockaddr*)&hsock->peer_addr, socklen);
-	EPOLL_BUFF *sbuf = &hsock->_send_buf;
+	BUFF_CTX *sbuf = &hsock->_send_buf;
 	int needlen = sizeof(int) + sizeof(hsock->peer_addr) + len;
     if (sbuf->buff == NULL)
     {
@@ -1139,7 +1143,7 @@ static void HsocketSendUdp(HSOCKET hsock, const char* data, int len)
 bool HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len)
 {
 	if (hsock->_conn_type == UDP_CONN){
-		EPOLL_BUFF *sbuf = &hsock->_send_buf;
+		BUFF_CTX *sbuf = &hsock->_send_buf;
 		int needlen = sizeof(int) + sizeof(hsock->peer_addr) + len;
     	if (sbuf->buff == NULL){
         	sbuf->buff = (char*)malloc(needlen);
@@ -1172,6 +1176,7 @@ bool HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, in
 	return false;
 }
 
+#ifdef KCP_SUPPORT
 static void HsocketSendKcp(HSOCKET hsock, const char* data, int len)
 {
 	Kcp_Content* ctx = (Kcp_Content*)hsock->_user_data;
@@ -1182,10 +1187,11 @@ static void HsocketSendKcp(HSOCKET hsock, const char* data, int len)
 		HsocketSendUdp(hsock,  data, len);
 	}
 }
+#endif
 
 static void HsocketSendTcp(HSOCKET hsock, const char* data, int len)
 {
-	EPOLL_BUFF *sbuf = &hsock->_send_buf;
+	BUFF_CTX *sbuf = &hsock->_send_buf;
 	if (sbuf->buff == NULL)
 	{
 		sbuf->buff = (char*)malloc(len);
@@ -1220,20 +1226,22 @@ bool HsocketSend(HSOCKET hsock, const char* data, int len)
 	case  UDP_CONN:
 		HsocketSendUdp(hsock, data, len);
 		break;
+#ifdef KCP_SUPPORT
 	case KCP_CONN:
 		HsocketSendKcp(hsock, data, len);
 		break;
+#endif
 	default:
 		break;
 	}
 	return true;
 }
 
-EPOLL_BUFF* HsocketGetBuff()
+BUFF_CTX* HsocketGetBuff()
 {
-	EPOLL_BUFF* epoll_Buff = (EPOLL_BUFF*)malloc(sizeof(EPOLL_BUFF));
+	BUFF_CTX* epoll_Buff = (BUFF_CTX*)malloc(sizeof(BUFF_CTX));
 	if (epoll_Buff){
-		memset(epoll_Buff, 0x0, sizeof(EPOLL_BUFF));
+		memset(epoll_Buff, 0x0, sizeof(BUFF_CTX));
 		epoll_Buff->buff = (char*)malloc(DATA_BUFSIZE);
 		if (epoll_Buff->buff){
 			*(epoll_Buff->buff) = 0x0;
@@ -1243,7 +1251,7 @@ EPOLL_BUFF* HsocketGetBuff()
 	return epoll_Buff;
 }
 
-bool HsocketSetBuff(EPOLL_BUFF* epoll_Buff, const char* data, int len)
+bool HsocketSetBuff(BUFF_CTX* epoll_Buff, const char* data, int len)
 {
 	if (epoll_Buff == NULL) return false;
 	int left = epoll_Buff->size - epoll_Buff->offset;
@@ -1265,7 +1273,7 @@ bool HsocketSetBuff(EPOLL_BUFF* epoll_Buff, const char* data, int len)
 	return true;
 }
 
-bool HsocketSendBuff(EPOLL_SOCKET* hsock, EPOLL_BUFF* epoll_Buff)
+bool HsocketSendBuff(SOCKET_CTX* hsock, BUFF_CTX* epoll_Buff)
 {
 	if (hsock == NULL || epoll_Buff == NULL) return false;
 	if (hsock->_conn_type == UDP_CONN)
@@ -1304,7 +1312,7 @@ int HsocketPopBuf(HSOCKET hsock, int len)
 		return ctx->offset;
 	}
 #endif
-	EPOLL_BUFF *rbuf = &hsock->_recv_buf;
+	BUFF_CTX *rbuf = &hsock->_recv_buf;
 	rbuf->offset -= len;
 	memmove(rbuf->buff, rbuf->buff + len, rbuf->offset);
 	return rbuf->offset;

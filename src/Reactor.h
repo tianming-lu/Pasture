@@ -70,7 +70,7 @@ enum CONN_TYPE:char {
 	KCP_CONN = 0x04,
 	HTTP_CONN = 0x06,
 	WS_CONN = 0x08,
-	ITMER,
+	TIMER,
 };
 
 enum SOCKET_STAT:char{
@@ -92,7 +92,7 @@ class BaseProtocol;
 #ifdef __WINDOWS__
 typedef struct _SOCKET_CTX* HSOCKET;
 #else
-typedef struct _EPOLL_SOCKET* HSOCKET;
+typedef struct _SOCKET_CTX* HSOCKET;
 #endif
 
 typedef void (*Timer_Callback) (HSOCKET, BaseProtocol*);
@@ -108,13 +108,13 @@ typedef struct _BUFF_CTX
 	struct _SOCKET_CTX* hsock;
 }BUFF_CTX, *HBUFF;
 #else
-typedef struct _EPOLL_BUFF
+typedef struct _BUFF_CTX
 {
 	char* buff;
 	int offset;
 	int size;
 	uint8_t lock_flag;
-}EPOLL_BUFF, * HNETBUFF;
+}BUFF_CTX, * HBUFF;
 #endif
 
 #ifdef __WINDOWS__
@@ -122,7 +122,7 @@ typedef struct _SOCKET_CTX
 {
 	SOCKET			fd;
 #else
-typedef struct _EPOLL_SOCKET
+typedef struct _SOCKET_CTX
 {
 	int				fd;
 #endif
@@ -137,11 +137,14 @@ typedef struct _EPOLL_SOCKET
 }SOCKET_CTX, * HSOCKET;
 #else
 	uint8_t			_stat;
-	EPOLL_BUFF		_recv_buf;
-	EPOLL_BUFF		_send_buf;
-	//timer
-	Timer_Callback  _callback;
-}EPOLL_SOCKET, * HSOCKET;
+	union{
+		struct{
+			BUFF_CTX		_recv_buf;
+			BUFF_CTX		_send_buf;
+		};
+		Timer_Callback  _callback;
+	};
+}SOCKET_CTX, * HSOCKET;
 #endif // __WINDOWS__
 
 #define SOCKET_CTX_SIZE sizeof(SOCKET_CTX)

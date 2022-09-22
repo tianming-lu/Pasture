@@ -26,4 +26,8 @@ noLockServer.cpp    无状态服务
 Sheeps： [https://gitee.com/lutianming/Sheeps.git](https://gitee.com/lutianming/Sheeps.git) 用于服务器压力测试的框架
 
 
+#### 另一个无用户锁的项目Pasture2
+[https://gitee.com/lutianming/pasture2.git](https://gitee.com/lutianming/pasture2.git) 
+
+
 

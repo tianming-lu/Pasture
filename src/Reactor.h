@@ -1,4 +1,4 @@
-﻿/*	
+/*	
 *	Copyright(c) 2019 lutianming email：641471957@qq.com
 *	Pasture is licensed under the Mulan PSL v1.
 *	You can use this software according to the terms and conditions of the Mulan PSL v1.
@@ -54,13 +54,13 @@
 #endif // __WINDOWS__
 
 #ifdef __WINDOWS__
-#define LONGLOCK(a)  while (InterlockedExchange(a, 1)){Sleep(0);}
-#define LONGUNLOCK(a)	InterlockedExchange(a, 0)
-#define LONGTRYLOCK(a)	!InterlockedExchange(a, 1)
+#define LONGLOCK(a)  while (InterlockedExchange(&a, 1)){Sleep(0);}
+#define LONGUNLOCK(a)	InterlockedExchange(&a, 0)
+#define LONGTRYLOCK(a)	!InterlockedExchange(&a, 1)
 #else
-#define LONGLOCK(a)	while (__sync_fetch_and_or(a, 1)){sleep(0);}
-#define LONGUNLOCK(a)	__sync_fetch_and_and(a, 0)
-#define LONGTRYLOCK(a)	!__sync_fetch_and_or(a, 1)
+#define LONGLOCK(a)	while (__sync_fetch_and_or(&a, 1)){sleep(0);}
+#define LONGUNLOCK(a)	__sync_fetch_and_and(&a, 0)
+#define LONGTRYLOCK(a)	!__sync_fetch_and_or(&a, 1)
 #endif
 
 enum CONN_TYPE:char {
@@ -71,13 +71,8 @@ enum CONN_TYPE:char {
 	HTTP_CONN = 0x06,
 	WS_CONN = 0x08,
 	TIMER,
-};
-
-enum SOCKET_STAT:char{
-	SOCKET_CONNECTING = 0,
-	SOCKET_CONNECTED,
-	SOCKET_CLOSEING,
-	SOCKET_CLOSED
+	EVENT,
+	SIGNAL
 };
 
 enum PROTOCOL_TPYE:char {
@@ -86,128 +81,171 @@ enum PROTOCOL_TPYE:char {
 	AUTO_PROTOCOL = 2
 };
 
+typedef struct {
+	long	ProtocolCount;
+#ifdef __WINDOWS__
+	HANDLE	CompletionPort;
+#else
+	int		epoll_fd;
+#endif
+}ThreadStat;
+
 class BaseFactory;
 class BaseProtocol;
 
-#ifdef __WINDOWS__
-typedef struct _SOCKET_CTX* HSOCKET;
-#else
-typedef struct _SOCKET_CTX* HSOCKET;
-#endif
+typedef struct Timer_Content* HTIMER;
+typedef struct Socket_Content* HSOCKET;
+typedef void (*Timer_Callback) (HTIMER, BaseProtocol*);
+typedef void (*Event_Callback)(BaseProtocol*, void*);
+typedef void (*Signal_Callback)(BaseProtocol*, unsigned long long);
+typedef void (*Unbind_Callback)(HSOCKET, BaseProtocol*, BaseProtocol*, void*);
+typedef void (*Rebind_Callback)(HSOCKET, BaseProtocol*, void*);
 
-typedef void (*Timer_Callback) (HSOCKET, BaseProtocol*);
-
 #ifdef __WINDOWS__
-typedef struct _BUFF_CTX
-{
+typedef struct Socket_Send_Content {
 	OVERLAPPED	overlapped;
 	WSABUF		databuf;
-	int32_t		offset;
-	int32_t		size;
-	BYTE		type;
-	struct _SOCKET_CTX* hsock;
-}BUFF_CTX, *HBUFF;
-#else
-typedef struct _BUFF_CTX
-{
-	char* buff;
-	int offset;
-	int size;
-	uint8_t lock_flag;
-}BUFF_CTX, * HBUFF;
-#endif
+	char		event_type;	//投递类型accept, conect, read, write
+}*HSENDBUFF;
+#define SEND_CTX_SIZE sizeof(Socket_Send_Content)
 
-#ifdef __WINDOWS__
-typedef struct _SOCKET_CTX
-{
-	SOCKET			fd;
-#else
-typedef struct _SOCKET_CTX
-{
-	int				fd;
-#endif
-	CONN_TYPE				_conn_type;
-	struct sockaddr_in6		peer_addr;
-	BaseFactory*			factory;
-	BaseProtocol*			_user;
-	void*					_user_data;
-#ifdef __WINDOWS__
-	char*			recv_buf;
-	BUFF_CTX*		_IocpBuff;
-}SOCKET_CTX, * HSOCKET;
-#else
-	uint8_t			_stat;
-	union{
-		struct{
-			BUFF_CTX		_recv_buf;
-			BUFF_CTX		_send_buf;
+typedef struct Socket_Content {
+	union {
+		struct {
+			OVERLAPPED	overlapped;
+			WSABUF		databuf;
 		};
-		Timer_Callback  _callback;
+		struct {
+			BaseProtocol* rebind_user;
+			union{
+				Unbind_Callback unbind_call;
+				Rebind_Callback rebind_call;
+			};
+			void* call_data;
+		};
 	};
-}SOCKET_CTX, * HSOCKET;
-#endif // __WINDOWS__
+	char		event_type;	//投递类型accept, conect, read, write
 
-#define SOCKET_CTX_SIZE sizeof(SOCKET_CTX)
+	CONN_TYPE	conn_type;
+	DWORD		flag;
 
-class BaseProtocol
-{
-public:
-	BaseFactory* factory = NULL;
-#ifdef __WINDOWS__
-	HANDLE			mutex = NULL;
+	char*		recv_buf;
+	int			offset;
+	int			size;
+
+	int						fromlen;
+	struct sockaddr_in6		peer_addr;
+	BaseProtocol*			user;
+	void*					user_data;	
+	SOCKET					fd;
+}*HSOCKET;
+#define SOCKET_CTX_SIZE sizeof(Socket_Content)
+
+typedef struct Timer_Content {
+	CONN_TYPE		conn_type;
+	BaseProtocol*	user;
+	Timer_Callback	call;
+	HANDLE			timer;
+	ThreadStat*		thread_stat;
+	long			lock;
+	long			close;
+}*HTIMER;
+#define TIMER_CTX_SIZE sizeof(Timer_Content)
+
+typedef struct Event_Content {
+	CONN_TYPE		conn_type;
+	BaseProtocol*	user;
+	Event_Callback	call;
+	void*			event_data;
+}*HEVENT;
+#define EVENT_CTX_SIZE sizeof(Event_Content)
+
+typedef struct Signal_Content {
+	CONN_TYPE			conn_type;
+	BaseProtocol*		user;
+	Signal_Callback		call;
+	unsigned long long	signal;
+}*HSIGNAL;
+#define SIGNAL_CTX_SIZE sizeof(Signal_Content)
+
 #else
-	std::mutex* mutex = NULL;
+
+typedef struct Socket_Content {
+	CONN_TYPE				conn_type;
+	unsigned char			_conn_stat:7;
+	unsigned char			_flag :1;
+	unsigned char			_send_lock;
+	struct sockaddr_in6		peer_addr;
+	
+	BaseProtocol* 			rebind_user;
+	union{
+		Unbind_Callback		unbind_call;
+		Rebind_Callback		rebind_call;
+	};
+	void*					call_data;
+
+	BaseProtocol*			user;
+	void*					user_data;
+
+	int				fd;
+	int 			epoll_fd;
+
+	char*			recv_buf;
+	int				recv_size;
+	int				offset;
+
+	char*			write_buf;
+	int				write_size;
+	int				write_offset;
+}*HSOCKET;
+#define SOCKET_CTX_SIZE sizeof(Socket_Content)
+
+typedef struct Timer_Content{
+	CONN_TYPE	conn_type;
+	unsigned char _conn_stat;
+	int	fd;
+	int epoll_fd;
+	BaseProtocol* user;
+	Timer_Callback call;
+}TIMER_CTX, *HTIMER;
+
+typedef struct Event_Content{
+	CONN_TYPE	conn_type;
+	int			fd;
+	int 		epoll_fd;
+	BaseProtocol* user;
+	Event_Callback call;
+	void* 	event_data;
+}EVEVT_CTX, *HEVENT;
+
+typedef struct Signal_Content{
+	CONN_TYPE	conn_type;
+	int			fd;
+	int 		epoll_fd;
+	BaseProtocol* user;
+	Signal_Callback call;
+	unsigned long long signal;
+}SIGNAL_CTX, *HSIGNAL;
 #endif // __WINDOWS__
+
+Reactor_API	ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto);
+Reactor_API void		__STDCALL ThreadUnDistribution(BaseProtocol* proto);
+
+class BaseProtocol{
+public:
+	BaseFactory*	factory = NULL;
+	ThreadStat*		thread_stat = NULL;
 	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
 	long			sockCount = 0;
 
 public:
 	BaseProtocol() { 
 		this->protoType = SERVER_PROTOCOL;
-#ifdef __WINDOWS__
-		this->mutex = CreateMutexA(NULL, false, NULL);
-#else
-		this->mutex = new(std::nothrow) std::mutex();
-#endif
 	};
-	virtual ~BaseProtocol() {
-		
-#ifdef __WINDOWS__
-		if (this->mutex) CloseHandle(this->mutex);
-#else
-		if (this->mutex) delete this->mutex;
-#endif
-	};
-	void SetFactory(BaseFactory* pfc, PROTOCOL_TPYE prototype) { this->factory = pfc; this->protoType = prototype; };
-	void SetNoLock() {
-#ifdef __WINDOWS__
-		if (this->mutex) { CloseHandle(this->mutex); this->mutex = NULL; }
-#else
-		if (this->mutex) {delete this->mutex; this->mutex = NULL;}
-#endif
-	}
-	void Lock() { 
-#ifdef __WINDOWS__
-		if (this->mutex) WaitForSingleObject(this->mutex, INFINITE);
-#else
-		if (this->mutex) this->mutex->lock();
-#endif
-	};
-	bool TryLock(){
-#ifdef __WINDOWS__
-		if (this->mutex) return WaitForSingleObject(this->mutex, 0) == WAIT_OBJECT_0 ? true : false;
-#else
-		if (this->mutex) return this->mutex->try_lock();
-#endif
-		return true;
-	}
-	void UnLock() {
-#ifdef __WINDOWS__
-		if (this->mutex) ReleaseMutex(this->mutex);
-#else
-		if (this->mutex) this->mutex->unlock();
-#endif
-	};
+	virtual ~BaseProtocol() {};
+	void	SetFactory(BaseFactory* pfc, PROTOCOL_TPYE prototype) { this->factory = pfc; this->protoType = prototype; }
+	void	ThreadSet() { ThreadDistribution(this); }
+	void	ThreadUnset() { ThreadUnDistribution(this); }
 
 public:
 	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
@@ -216,8 +254,7 @@ public:
 	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
 };
 
-class BaseFactory
-{
+class BaseFactory{
 public:
 	BaseFactory() {};
 	virtual ~BaseFactory() {};
@@ -241,9 +278,7 @@ public:
 
 typedef void (*autofree)(BaseProtocol* proto);
 
-class AutoProtocol :
-	public BaseProtocol
-{
+class AutoProtocol: public BaseProtocol{
 public:
 	char* buf = NULL;
 	int buflen = 0;
@@ -268,13 +303,9 @@ extern "C"
 	Reactor_API HSOCKET	__STDCALL	HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE iotype);
 	Reactor_API bool	__STDCALL	HsocketSend(HSOCKET hsock, const char* data, int len);
 	Reactor_API bool	__STDCALL	HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len);
-	Reactor_API bool	__STDCALL	HsocketClose(HSOCKET hsock);
+	Reactor_API void	__STDCALL	HsocketClose(HSOCKET hsock);
 	Reactor_API void 	__STDCALL	HsocketClosed(HSOCKET hsock);
 	Reactor_API int		__STDCALL	HsocketPopBuf(HSOCKET hsock, int len);
-
-	Reactor_API	HBUFF	__STDCALL	HsocketGetBuff();
-	Reactor_API	bool		__STDCALL	HsocketSetBuff(HBUFF netbuff, const char* data, int len);
-	Reactor_API	bool		__STDCALL	HsocketSendBuff(HSOCKET hsock, HBUFF netbuff);
 
 	Reactor_API void	__STDCALL	HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port);
 	Reactor_API void	__STDCALL	HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz);
@@ -282,14 +313,17 @@ extern "C"
 	Reactor_API void	__STDCALL	HsocketLocalIP(HSOCKET hsock, char* ip, size_t ipsz);
 	Reactor_API int		__STDCALL	HsocketLocalPort(HSOCKET hsock);
 
-	Reactor_API	HSOCKET	__STDCALL	TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback);
-	Reactor_API void 	__STDCALL	TimerDelete(HSOCKET hsock);
+	Reactor_API	HTIMER	__STDCALL	TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback);
+	Reactor_API void 	__STDCALL	TimerDelete(HTIMER hsock);
+	Reactor_API void	__STDCALL	PostEvent(BaseProtocol* proto, Event_Callback callback, void* event_data);
+	Reactor_API void	__STDCALL	PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long long signal);
 
-	Reactor_API BaseProtocol*	__STDCALL HsocketBindUser(HSOCKET hsock, BaseProtocol* proto);
-	Reactor_API int				__STDCALL	GetHostByName(const char* name, char* buf, size_t size);
+	Reactor_API void	__STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback call, void* call_data);
+	Reactor_API void	__STDCALL HsocketRebindUser(HSOCKET hsock, BaseProtocol* proto, Rebind_Callback call, void* call_data);
+	Reactor_API int		__STDCALL GetHostByName(const char* name, char* buf, size_t size);
 
 #ifdef OPENSSL_SUPPORT
-	Reactor_API bool __STDCALL HsocketUptoSSL(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key);
+	Reactor_API bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key);
 #endif
 
 #ifdef KCP_SUPPORT
@@ -297,7 +331,6 @@ extern "C"
 	Reactor_API void	__STDCALL HsocketKcpNodelay(HSOCKET hsock, int nodelay, int interval, int resend, int nc);
 	Reactor_API void	__STDCALL HsocketKcpWndsize(HSOCKET hsock, int sndwnd, int rcvwnd);
 	Reactor_API int		__STDCALL HsocketKcpGetconv(HSOCKET hsock);
-	Reactor_API void	__STDCALL HsocketKcpEnable(HSOCKET hsock, char enable);
 	Reactor_API void	__STDCALL HsocketKcpUpdate(HSOCKET hsock);
 	Reactor_API int		__STDCALL HsocketKcpDebug(HSOCKET hsock, char* buf, int size);
 #endif

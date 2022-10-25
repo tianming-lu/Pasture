@@ -3,7 +3,8 @@
 #### 介绍
 
 本项目是一个纯净的TCP/UDP/SSL/KCP网络框架，支持IPv4、IPv6双栈，毫秒级定时器，默认多线程运，Proreactor模型，上手简单，业务开发简单方便。  
-本项目的一个特点是每个连接都绑定一个类实例用于逻辑处理和数据保存，并且多个连接可以绑定同一个实例，这利于多个相关的连接更加方便的访问共享数据，业务逻辑开发相对简单很多。又由于框架本身是多线程的，所以可能出现资源竞争，所以会在调用类成员时加锁，这是以牺牲性能为代价的，不过整体来说，用于快速开发一些简单的业务，这点牺牲是值得的。
+本项目的一个特点是每个连接都绑定一个类实例用于逻辑处理和数据保存，并且多个连接可以绑定同一个实例，这利于多个相关的连接更加方便的访问共享数据，业务逻辑开发相对简单很多。
+
 
 #### 源码说明
 
@@ -23,11 +24,4 @@ noLockServer.cpp    无状态服务
 
 #### 以下项目使用本框架
 
-Sheeps： [https://gitee.com/lutianming/Sheeps.git](https://gitee.com/lutianming/Sheeps.git) 用于服务器压力测试的框架
-
-
-#### 另一个无用户锁的项目Pasture2
-[https://gitee.com/lutianming/pasture2.git](https://gitee.com/lutianming/pasture2.git) 
-
-
-
+SuperSheeps服务器压力测试的框架： [http://www.supersheeps.cn/](http://www.supersheeps.cn/) 

@@ -323,7 +323,7 @@ extern "C"
 	Reactor_API int		__STDCALL GetHostByName(const char* name, char* buf, size_t size);
 
 #ifdef OPENSSL_SUPPORT
-	Reactor_API bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key);
+	Reactor_API bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key);
 #endif
 
 #ifdef KCP_SUPPORT

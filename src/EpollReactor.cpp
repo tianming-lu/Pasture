@@ -352,7 +352,7 @@ static inline void epoll_mod_read_write_or_close(HSOCKET hsock){
 }
 
 #ifdef OPENSSL_SUPPORT
-static bool do_ssl_init(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key){
+static bool do_ssl_init(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key){
 	struct SSL_Content* ssl_ctx = (struct SSL_Content*)malloc(sizeof(struct SSL_Content));
 	if (!ssl_ctx) { return false; }
 
@@ -362,7 +362,7 @@ static bool do_ssl_init(HSOCKET hsock, int openssl_type, const char* ca_crt, con
 		free(ssl_ctx);
 		return false;
 	}
-	SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_NONE, NULL);
+	verify? SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_PEER, NULL): SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_NONE, NULL);
 	if (ca_crt) {
 		BIO * cbio = BIO_new_mem_buf(ca_crt, (int)strlen(ca_crt));
 		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式 DER格式用d2i_X509_bio(cbio, NULL);
@@ -395,38 +395,20 @@ static bool do_ssl_init(HSOCKET hsock, int openssl_type, const char* ca_crt, con
 	SSL_set_fd(ssl_ctx->ssl, hsock->fd);
 	openssl_type == OPENSSL_CLIENT? SSL_set_connect_state(ssl_ctx->ssl): SSL_set_accept_state(ssl_ctx->ssl);
 	hsock->user_data = ssl_ctx;
+	hsock->conn_type = SSL_CONN;
+	
+	if (openssl_type == OPENSSL_CLIENT){
+		SSL_do_handshake(ssl_ctx->ssl);
+	}
 	return true;
 }
 
 static void do_ssl_upto_client(HSOCKET hsock){
-	if (!do_ssl_init(hsock, OPENSSL_CLIENT, NULL, NULL, NULL)){
+	if (!do_ssl_init(hsock, OPENSSL_CLIENT, 0, NULL, NULL, NULL)){
 		do_close(hsock);
 		return;
 	}
-
-	struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->user_data;
-	int ret = SSL_do_handshake(ssl_ctx->ssl);
-	if (ret == 1){
-		if (hsock->_conn_stat < SOCKET_CLOSED){
-			hsock->_conn_stat = SOCKET_CONNECTED;
-			BaseProtocol* proto = hsock->user;
-			hsock->_flag = 1;
-			proto->ConnectionMade(hsock, hsock->conn_type);
-			hsock->_flag = 0;
-			epoll_mod_read_write_or_close(hsock);
-		}
-	}else{
-		int err = SSL_get_error(ssl_ctx->ssl, ret);
-		switch (err){
-		case SSL_ERROR_WANT_WRITE:
-		case SSL_ERROR_WANT_READ:
-			epoll_mod_read(hsock);
-			break;
-		default:
-			do_close(hsock);
-			break;
-		}
-	}
+	epoll_mod_read_write_or_close(hsock);
 }
 
 static int do_ssl_handshak(HSOCKET hsock, struct SSL_Content* ssl_ctx){
@@ -470,7 +452,6 @@ if (hsock->conn_type == SSL_CONN)
 	else{
 		do_close(hsock);
 	}
-	
 }
 
 static void do_write_udp(HSOCKET hsock){
@@ -738,9 +719,11 @@ static void do_read(HSOCKET hsock){
 static void do_rebind(HSOCKET hsock){
 	BaseProtocol* proto = hsock->user;
 	proto->sockCount++;
-	Rebind_Callback callback = hsock->rebind_call;
-	callback(hsock, proto, hsock->call_data);
 	hsock->_conn_stat = SOCKET_CONNECTED;
+	Rebind_Callback callback = hsock->rebind_call;
+	hsock->_flag = 1;
+	callback(hsock, proto, hsock->call_data);
+	hsock->_flag = 0;
 	epoll_add_read_write_or_close(hsock);
 }
 
@@ -1303,28 +1286,10 @@ int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
 }
 
 #ifdef OPENSSL_SUPPORT
-bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key){
+bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key){
 	bool ret = false;
 	if (hsock->conn_type == TCP_CONN){
-		ret = do_ssl_init(hsock, openssl_type, ca_crt, user_crt, pri_key);
-		hsock->conn_type = SSL_CONN;
-	}
-	if (ret && openssl_type == OPENSSL_CLIENT){
-		struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->user_data;
-		int res = SSL_do_handshake(ssl_ctx->ssl);
-		if (res == 1){
-			return true;
-		}else{
-			int err = SSL_get_error(ssl_ctx->ssl, res);
-			switch (err){
-			case SSL_ERROR_WANT_WRITE:
-			case SSL_ERROR_WANT_READ:
-				break;
-			default:
-				return false;
-				break;
-			}
-		}
+		ret = do_ssl_init(hsock, openssl_type, verify, ca_crt, user_crt, pri_key);
 	}
 	return ret;
 }

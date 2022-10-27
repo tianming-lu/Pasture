@@ -625,7 +625,7 @@ static void do_read(HSOCKET IocpSock) {
 }
 
 #ifdef OPENSSL_SUPPORT
-static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key) {
+static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key) {
 	struct SSL_Content* ssl_ctx = (SSL_Content*)malloc(sizeof(struct SSL_Content));
 	if (!ssl_ctx) {
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -635,7 +635,7 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, const char* ca_
 	ssl_ctx->ctx = openssl_type == OPENSSL_CLIENT? SSL_CTX_new(SSLv23_client_method()): SSL_CTX_new(SSLv23_server_method());
 	if (!ssl_ctx->ctx) { free(ssl_ctx); return false; }
 
-	SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_NONE, NULL);
+	verify ? SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_PEER, NULL): SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_NONE, NULL);
 	if (ca_crt) {
 		BIO * cbio = BIO_new_mem_buf(ca_crt, (int)strlen(ca_crt));
 		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式 DER格式用d2i_X509_bio(cbio, NULL);
@@ -690,7 +690,7 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, const char* ca_
 }
 
 static void Hsocket_upto_SSL_Client(HSOCKET IocpSock) {
-	if (!Hsocket_SSL_init(IocpSock, OPENSSL_CLIENT, NULL, NULL, NULL))
+	if (!Hsocket_SSL_init(IocpSock, OPENSSL_CLIENT, 0, NULL, NULL, NULL))
 		return do_close(IocpSock, IocpSock->event_type, 0);
 	PostRecv(IocpSock);
 }
@@ -1350,10 +1350,10 @@ int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
 }
 
 #ifdef OPENSSL_SUPPORT
-bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, const char* ca_crt, const char* user_crt, const char* pri_key) {
+bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key) {
 	bool ret = false;
 	if (hsock->conn_type == TCP_CONN) {
-		ret = Hsocket_SSL_init(hsock, openssl_type, ca_crt, user_crt, pri_key);
+		ret = Hsocket_SSL_init(hsock, openssl_type, verify, ca_crt, user_crt, pri_key);
 	}
 	return ret;
 }

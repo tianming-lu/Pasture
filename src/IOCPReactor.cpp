@@ -164,17 +164,19 @@ static inline HSOCKET NewIOCP_Socket(){
 }
 
 static inline void ReleaseIOCP_Socket(HSOCKET IocpSock){
-	switch (IocpSock->conn_type){
+	switch (IocpSock->conn_type) {
 #ifdef OPENSSL_SUPPORT
 	case SSL_CONN: {
 		struct SSL_Content* ssl_ctx = (struct SSL_Content*)IocpSock->user_data;
-		//BIO_free(ssl_ctx->rbio);  //貌似bio会随着SSL_free一起释放，先行释放会引起崩溃，待后续确认
-		//BIO_free(ssl_ctx->wbio);
-		if (ssl_ctx->wbuf) free(ssl_ctx->wbuf);
-		if (ssl_ctx->rbuf) free(ssl_ctx->rbuf);
-		if (ssl_ctx->ssl) { SSL_shutdown(ssl_ctx->ssl); SSL_free(ssl_ctx->ssl); }
-		if (ssl_ctx->ctx) SSL_CTX_free(ssl_ctx->ctx);
-		free(ssl_ctx);
+		if (ssl_ctx) {
+			//BIO_free(ssl_ctx->rbio);  //貌似bio会随着SSL_free一起释放，先行释放会引起崩溃，待后续确认
+			//BIO_free(ssl_ctx->wbio);
+			if (ssl_ctx->wbuf) free(ssl_ctx->wbuf);
+			if (ssl_ctx->rbuf) free(ssl_ctx->rbuf);
+			if (ssl_ctx->ssl) { SSL_shutdown(ssl_ctx->ssl); SSL_free(ssl_ctx->ssl); }
+			if (ssl_ctx->ctx) SSL_CTX_free(ssl_ctx->ctx);
+			free(ssl_ctx);
+		}
 		break;
 	}
 #endif

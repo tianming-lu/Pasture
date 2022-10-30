@@ -242,7 +242,7 @@ static inline void epoll_add_read(HSOCKET hsock) {
 	int event = hsock->write_offset > 0 ? EPOLLIN | EPOLLOUT : EPOLLIN;
 	ev.events = event | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
-	epoll_ctl(hsock->epoll_fd, EPOLL_CTL_ADD, hsock->fd, &ev);	
+	epoll_ctl(hsock->epoll_fd, EPOLL_CTL_ADD, hsock->fd, &ev);
 }
 
 static inline void epoll_mod_read(HSOCKET hsock) {
@@ -263,7 +263,7 @@ static inline void epoll_mod_write(HSOCKET hsock){
 
 static inline void epoll_del_read(int fd, int epoll_fd) {
 	struct epoll_event ev;
-	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &ev);	
+	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &ev);
 }
 
 static void set_linger_for_fd(int fd){
@@ -724,7 +724,7 @@ static void do_rebind(HSOCKET hsock){
 	hsock->_flag = 1;
 	callback(hsock, proto, hsock->call_data);
 	hsock->_flag = 0;
-	epoll_add_read_write_or_close(hsock);
+	epoll_mod_read_write_or_close(hsock);
 }
 
 static void do_timer(HTIMER hsock){

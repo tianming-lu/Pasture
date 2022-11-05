@@ -239,7 +239,7 @@ static inline void epoll_add_connect(HSOCKET hsock){
 
 static inline void epoll_add_read(HSOCKET hsock) {
 	struct epoll_event ev;
-	int event = hsock->write_offset > 0 ? EPOLLIN | EPOLLOUT : EPOLLIN;
+	int event = hsock->write_offset > 0 ? EPOLLOUT : EPOLLIN;
 	ev.events = event | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
 	epoll_ctl(hsock->epoll_fd, EPOLL_CTL_ADD, hsock->fd, &ev);
@@ -247,7 +247,7 @@ static inline void epoll_add_read(HSOCKET hsock) {
 
 static inline void epoll_mod_read(HSOCKET hsock) {
 	struct epoll_event ev;
-	int event = hsock->write_offset > 0 ? EPOLLIN | EPOLLOUT : EPOLLIN;
+	int event = hsock->write_offset > 0 ? EPOLLOUT : EPOLLIN;
 	ev.events = event | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
 	epoll_ctl(hsock->epoll_fd, EPOLL_CTL_MOD, hsock->fd, &ev);	
@@ -256,7 +256,7 @@ static inline void epoll_mod_read(HSOCKET hsock) {
 static inline void epoll_mod_write(HSOCKET hsock){
 	if (hsock->_flag) return;
 	struct epoll_event ev;
-	ev.events = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLET | EPOLLONESHOT;
+	ev.events = EPOLLOUT | EPOLLERR | EPOLLET | EPOLLONESHOT;
 	ev.data.ptr = hsock;
 	epoll_ctl(hsock->epoll_fd, EPOLL_CTL_MOD, hsock->fd, &ev);
 }
@@ -759,7 +759,7 @@ static void do_signal(HSIGNAL hsock){
 	free(hsock);
 }
 
-static void do_accpet(HSOCKET listenhsock){
+static void do_accept(HSOCKET listenhsock){
 	BaseFactory* fc = (BaseFactory*)listenhsock->user_data;
     struct sockaddr_in6 addr;
 	socklen_t len = sizeof(addr);
@@ -831,9 +831,9 @@ static void read_work_thread(void* args){
 						else if (hsock->_conn_stat > SOCKET_CONNECTING)
 							do_write(hsock);
 						}
-					if (events & EPOLLIN){  //read or timer or event
+					if (events & EPOLLIN){  //read or accpet
 						if (hsock->_conn_stat == SOCKET_ACCEPTING)
-							do_accpet(hsock);
+							do_accept(hsock);
 						else 
 							do_read(hsock);
 					}

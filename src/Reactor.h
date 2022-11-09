@@ -258,7 +258,7 @@ class BaseFactory{
 public:
 	BaseFactory() {};
 	virtual ~BaseFactory() {};
-	void Set(const char* addr, uint16_t listenport) {snprintf(this->ServerAddr, sizeof(this->ServerAddr), addr); this->ServerPort = listenport; };
+	void Set(const char* addr, uint16_t listenport) {snprintf(this->ServerAddr, sizeof(this->ServerAddr), "%s", addr); this->ServerPort = listenport; };
 
 public:
 	char		ServerAddr[40] = { 0x0 };
@@ -285,7 +285,7 @@ public:
 	autofree freefunc = NULL;
 	AutoProtocol() {};
 	virtual ~AutoProtocol() { if (buf) free(buf); };
-	virtual void ConnectionMade(HSOCKET hsock) = 0;
+	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
 	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
 	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
 	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;

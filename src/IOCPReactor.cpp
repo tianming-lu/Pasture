@@ -861,7 +861,7 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam){
 		for (iter = Factorys.begin(); iter != Factorys.end(); ++iter){
 			iter->second->FactoryLoop();
 		}
-		Sleep(100);
+		Sleep(1000);
 	}
 	return 0;
 }

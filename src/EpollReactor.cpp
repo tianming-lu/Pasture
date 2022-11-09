@@ -869,7 +869,7 @@ static void main_work_thread(void* args){
 		for (iter = Factorys.begin(); iter != Factorys.end(); ++iter){
 			iter->second->FactoryLoop();
 		}
-		usleep(100*1000);
+		sleep(1);
 	}
 }
 

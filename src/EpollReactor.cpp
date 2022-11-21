@@ -490,6 +490,9 @@ static void do_write_tcp(HSOCKET hsock){
 			hsock->write_offset -= n;
 			memmove(data, data + n, hsock->write_offset);
 		}
+		else if(errno != EINTR && errno != EAGAIN) {
+			hsock->write_offset = 0;
+		}
 	}
 	__sync_fetch_and_and(&hsock->_send_lock, 0);
 	epoll_mod_read_write_or_close(hsock);
@@ -511,6 +514,9 @@ static void do_write_ssl(HSOCKET hsock)
 		if(n > 0) {
 			hsock->write_offset -= n;
 			memmove(data, data + n, hsock->write_offset);
+		}
+		else{
+			hsock->write_offset = 0;
 		}
 	}
 	__sync_fetch_and_and(&hsock->_send_lock, 0);

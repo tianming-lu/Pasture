@@ -199,7 +199,7 @@ static int get_listen_sock(const char* ip, int port){
 
 	int ret = bind(fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
 	if( ret != 0) { 
-		printf("%s:%d %s:%d %d\n", __func__, __LINE__, ip, port, ret);
+		printf("%s:%d [%s]:%d %d\n", __func__, __LINE__, ip, port, ret);
 		return -2;
 	}
 	if (listen(fd, 10)) {return -3;}
@@ -515,7 +515,7 @@ static void do_write_ssl(HSOCKET hsock)
 			hsock->write_offset -= n;
 			memmove(data, data + n, hsock->write_offset);
 		}
-		else{
+		else if(errno != EINTR && errno != EAGAIN){
 			hsock->write_offset = 0;
 		}
 	}

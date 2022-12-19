@@ -345,7 +345,17 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		if (!ret) {
 			BaseProtocol* old = IocpSock->user;
 			old->sockCount--;
-			IocpSock->unbind_call(IocpSock, old, IocpSock->rebind_user, IocpSock->call_data);
+			Unbind_Callback call = IocpSock->unbind_call;
+			if (call) {
+				call(IocpSock, old, IocpSock->rebind_user, IocpSock->call_data);
+			}
+			else {
+				BaseProtocol* user = IocpSock->rebind_user;
+				IocpSock->user = user;
+				IocpSock->event_type = REBIND;
+				HANDLE CompletionPort = user->thread_stat->CompletionPort;
+				PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
+			}
 			delete_protocol(old, old->factory);
 		}
 	}
@@ -1325,9 +1335,10 @@ int __STDCALL HsocketLocalPort(HSOCKET hsock) {
 	return ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback call, void* call_data) {
+void __STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback ucall, Rebind_Callback rcall, void* call_data) {
 	hsock->rebind_user = proto;
-	hsock->unbind_call = call;
+	hsock->unbind_call = ucall;
+	hsock->rebind_call = rcall;
 	hsock->call_data = call_data;
 	hsock->event_type = UNBIND;
 }

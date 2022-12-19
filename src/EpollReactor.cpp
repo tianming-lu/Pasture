@@ -315,7 +315,16 @@ static void do_close(HSOCKET hsock){
 		BaseProtocol* old = hsock->user;
 		old->sockCount--;
 		Unbind_Callback call = hsock->unbind_call;
-		call(hsock, old, hsock->rebind_user, hsock->call_data);
+		if (call){
+			call(hsock, old, hsock->rebind_user, hsock->call_data);
+		}
+		else{
+			BaseProtocol* user = hsock->rebind_user;
+			hsock->user = user;
+			hsock->epoll_fd = user->thread_stat->epoll_fd;
+			hsock->_conn_stat = SOCKET_REBIND;
+			epoll_add_connect(hsock);
+		}
 		delete_protocol(old, old->factory);
 		return;
 	}
@@ -508,7 +517,7 @@ static void do_write_ssl(HSOCKET hsock)
 	}
 	if (__sync_fetch_and_or(&hsock->_send_lock, 1)) return;
 	char* data = hsock->write_buf;
-	int len = hsock->write_offset;
+	int len = hsock->write_offset > 15*1024? 15*1024 : hsock->write_offset;
 	if (len > 0){
 		int n = SSL_write(ssl_ctx->ssl, data, len);
 		if(n > 0) {
@@ -516,6 +525,7 @@ static void do_write_ssl(HSOCKET hsock)
 			memmove(data, data + n, hsock->write_offset);
 		}
 		else if(errno != EINTR && errno != EAGAIN){
+			printf("%s:%d write ssl error n:%d len:%d sslerr:%d errno:%d\n", __func__, __LINE__, n, len, SSL_get_error(ssl_ctx->ssl, n), errno);
 			hsock->write_offset = 0;
 		}
 	}
@@ -1265,8 +1275,9 @@ int __STDCALL HsocketLocalPort(HSOCKET hsock) {
 	return ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback call, void* call_data) {
-	hsock->unbind_call = call;
+void __STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback ucall, Rebind_Callback rcall, void* call_data) {
+	hsock->unbind_call = ucall;
+	hsock->rebind_call = rcall;
 	hsock->rebind_user = proto;
 	hsock->call_data = call_data;
 	hsock->_conn_stat = SOCKET_UNBIND;

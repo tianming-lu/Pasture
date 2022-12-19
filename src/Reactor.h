@@ -117,10 +117,8 @@ typedef struct Socket_Content {
 		};
 		struct {
 			BaseProtocol* rebind_user;
-			union{
-				Unbind_Callback unbind_call;
-				Rebind_Callback rebind_call;
-			};
+			Unbind_Callback unbind_call;
+			Rebind_Callback rebind_call;
 			void* call_data;
 		};
 	};
@@ -178,10 +176,8 @@ typedef struct Socket_Content {
 	struct sockaddr_in6		peer_addr;
 	
 	BaseProtocol* 			rebind_user;
-	union{
-		Unbind_Callback		unbind_call;
-		Rebind_Callback		rebind_call;
-	};
+	Unbind_Callback			unbind_call;
+	Rebind_Callback			rebind_call;
 	void*					call_data;
 
 	BaseProtocol*			user;
@@ -318,7 +314,7 @@ extern "C"
 	Reactor_API void	__STDCALL	PostEvent(BaseProtocol* proto, Event_Callback callback, void* event_data);
 	Reactor_API void	__STDCALL	PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long long signal);
 
-	Reactor_API void	__STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback call, void* call_data);
+	Reactor_API void	__STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback ucall, Rebind_Callback rcall, void* call_data);
 	Reactor_API void	__STDCALL HsocketRebindUser(HSOCKET hsock, BaseProtocol* proto, Rebind_Callback call, void* call_data);
 	Reactor_API int		__STDCALL GetHostByName(const char* name, char* buf, size_t size);
 

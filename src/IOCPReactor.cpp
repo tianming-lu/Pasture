@@ -82,6 +82,14 @@ ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto) {
 	return tsa;
 }
 
+ThreadStat* __STDCALL ThreadDistributionIndex(BaseProtocol* proto, int index) {
+	if (proto->thread_stat) return proto->thread_stat;
+	ThreadStat* tsa = ThreadStats[index];
+	InterlockedIncrement(&tsa->ProtocolCount);
+	proto->thread_stat = tsa;
+	return tsa;
+}
+
 void __STDCALL ThreadUnDistribution(BaseProtocol* proto) {
 	ThreadStat* ts = proto->thread_stat;
 	InterlockedDecrement(&ts->ProtocolCount);

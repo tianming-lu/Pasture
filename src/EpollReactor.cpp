@@ -62,6 +62,14 @@ ThreadStat* ThreadDistribution(BaseProtocol* proto) {
 	return tsa;
 }
 
+ThreadStat* ThreadDistributionIndex(BaseProtocol* proto, int index) {
+	if (proto->thread_stat) return proto->thread_stat;
+	ThreadStat* tsa = ThreadStats[index];
+	__sync_add_and_fetch(&tsa->ProtocolCount, 1);
+	proto->thread_stat = tsa;
+	return tsa;
+}
+
 void ThreadUnDistribution(BaseProtocol* proto) {
 	ThreadStat* ts = proto->thread_stat;
 	__sync_sub_and_fetch (&ts->ProtocolCount, 1);

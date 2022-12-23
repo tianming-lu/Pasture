@@ -225,6 +225,7 @@ typedef struct Signal_Content{
 #endif // __WINDOWS__
 
 Reactor_API	ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto);
+Reactor_API ThreadStat* __STDCALL ThreadDistributionIndex(BaseProtocol* proto, int index);
 Reactor_API void		__STDCALL ThreadUnDistribution(BaseProtocol* proto);
 
 class BaseProtocol{
@@ -241,6 +242,7 @@ public:
 	virtual ~BaseProtocol() {};
 	void	SetFactory(BaseFactory* pfc, PROTOCOL_TPYE prototype) { this->factory = pfc; this->protoType = prototype; }
 	void	ThreadSet() { ThreadDistribution(this); }
+	void	ThreadSet(int index) { ThreadDistributionIndex(this, index); }
 	void	ThreadUnset() { ThreadUnDistribution(this); }
 
 public:

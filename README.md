@@ -19,7 +19,6 @@ EpollReactor.cpp    linux epoll 实现
 
 example为示例项目目录  
 echoServer.cpp    回显服务  
-noLockServer.cpp    无状态服务
 
 
 #### 以下项目使用本框架

@@ -347,8 +347,6 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		return;
 	}
 	case UNBIND: {
-		//BaseProtocol* newproto = IocpSock->rebind_user;
-		//HANDLE CompletionPort = newproto->thread_stat->CompletionPort;
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
 		if (!ret) {
 			BaseProtocol* old = IocpSock->user;
@@ -366,8 +364,8 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 			}
 			delete_protocol(old, old->factory);
 		}
+		return;
 	}
-	return;
 	default:
 		break;
 	}
@@ -466,7 +464,6 @@ static void do_aceept(HSOCKET IocpSock){
 	int nSize = sizeof(IocpSock->peer_addr);
 	getpeername(IocpSock->fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
 
-	//proto->sockCount++;
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 	PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
 
@@ -744,7 +741,6 @@ static void do_accepted(HSOCKET IocpSock){
 static void do_rebind(HSOCKET IocpSock) {
 	BaseProtocol* proto = IocpSock->user;
 	HANDLE CompletionPort = proto->thread_stat->CompletionPort;
-	//ReplaceIoCompletionPort(IocpSock->fd, CompletionPort, hsock);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, CompletionPort, (ULONG_PTR)IocpSock, 0);
 	proto->sockCount++;
 	Rebind_Callback callback = IocpSock->rebind_call;
@@ -850,6 +846,34 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 	return 0;
 }
 
+static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
+	HTIMER hsock = (HTIMER)lpParam;
+	ThreadStat* ts = hsock->thread_stat;
+	if (LONGTRYLOCK(hsock->lock)) {
+		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+	}
+}
+
+static void factorys_timer_callback(HTIMER timer, BaseProtocol* proto) {
+	std::map<uint16_t, BaseFactory*>::iterator iter;
+	for (iter = Factorys.begin(); iter != Factorys.end(); ++iter) {
+		iter->second->TimeOut();
+	}
+}
+
+static void factorys_timer_run() {
+	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
+	if (hsock) {
+		hsock->conn_type = TIMER;
+		hsock->user = NULL;
+		hsock->call = factorys_timer_callback;
+		hsock->thread_stat = ListenThreadStat;
+		hsock->close = 0;
+		hsock->lock = 0;
+		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, 0, 1000, 0);
+	}
+}
+
 DWORD WINAPI mainIOCPServer(LPVOID pParam){
 
 	ListenThreadStat = (ThreadStat*)malloc(sizeof(ThreadStat));
@@ -874,13 +898,7 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam){
 		}
 		CloseHandle(ThreadHandle);
 	}
-	std::map<uint16_t, BaseFactory*>::iterator iter;
-	while (true){
-		for (iter = Factorys.begin(); iter != Factorys.end(); ++iter){
-			iter->second->FactoryLoop();
-		}
-		Sleep(1000);
-	}
+	factorys_timer_run();
 	return 0;
 }
 
@@ -971,24 +989,17 @@ int __STDCALL FactoryStop(BaseFactory* fc){
 	return 0;
 }
 
-static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
-	HTIMER hsock = (HTIMER)lpParam;
-	ThreadStat* ts = hsock->thread_stat;
-	if (LONGTRYLOCK(hsock->lock)) {
-		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
-	}
-}
-
 HTIMER	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback) {
-	BaseFactory* factory = proto->factory;
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
-	hsock->conn_type = TIMER;
-	hsock->user = proto;
-	hsock->call = callback;
-	hsock->thread_stat = proto->thread_stat;
-	hsock->close = 0;
-	hsock->lock = 0;
-	CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, duetime, looptime, 0);
+	if (hsock) {
+		hsock->conn_type = TIMER;
+		hsock->user = proto;
+		hsock->call = callback;
+		hsock->thread_stat = proto->thread_stat;
+		hsock->close = 0;
+		hsock->lock = 0;
+		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, duetime, looptime, 0);
+	}
 	return hsock;
 }
 
@@ -997,25 +1008,28 @@ void __STDCALL TimerDelete(HTIMER hsock) {
 }
 
 void __STDCALL PostEvent(BaseProtocol* proto, Event_Callback callback, void* event_data) {
-	BaseFactory* factory = proto->factory;
 	HEVENT hsock = (HEVENT)malloc(sizeof(Event_Content));
-	hsock->conn_type = EVENT;
-	hsock->user = proto;
-	hsock->call = callback;
-	hsock->event_data = event_data;
-	ThreadStat* ts = proto->thread_stat;
-	PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+	if (hsock) {
+		hsock->conn_type = EVENT;
+		hsock->user = proto;
+		hsock->call = callback;
+		hsock->event_data = event_data;
+		ThreadStat* ts = proto->thread_stat;
+		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+	}
 }
 
 void __STDCALL PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long long signal) {
 	BaseFactory* factory = proto->factory;
 	HSIGNAL hsock = (HSIGNAL)malloc(sizeof(Signal_Content));
-	hsock->conn_type = SIGNAL;
-	hsock->user = proto;
-	hsock->call = callback;
-	hsock->signal = signal;
-	ThreadStat* ts = proto->thread_stat;
-	PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+	if (hsock) {
+		hsock->conn_type = SIGNAL;
+		hsock->user = proto;
+		hsock->call = callback;
+		hsock->signal = signal;
+		ThreadStat* ts = proto->thread_stat;
+		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+	}
 }
 
 static bool IOCPConnectUDP(BaseProtocol* proto, HSOCKET IocpSock, int listen_port)

@@ -863,10 +863,41 @@ static void read_work_thread(void* args){
 					}
 					break;
 			}
-
-			
 		}
 	}
+}
+
+static void factorys_timer_callback(HTIMER timer, BaseProtocol* proto) {
+	std::map<uint16_t, BaseFactory*>::iterator iter;
+	for (iter = Factorys.begin(); iter != Factorys.end(); ++iter) {
+		iter->second->TimeOut();
+	}
+}
+
+static void factorys_timer_run(){
+	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
+	if (hsock == NULL) 
+		return;
+	int tfd = timerfd_create(CLOCK_MONOTONIC, 0);   //创建定时器
+    if(tfd == -1) {
+		free(hsock);
+        return;
+    }
+	hsock->fd = tfd;
+	hsock->conn_type = TIMER;
+	hsock->user = NULL;
+	hsock->call = factorys_timer_callback;
+	hsock->epoll_fd = ListenThreadStat->epoll_fd;
+	hsock->_conn_stat = 0;
+
+    struct itimerspec time_intv; //用来存储时间
+    time_intv.it_value.tv_sec = 0;
+    time_intv.it_value.tv_nsec = 1*1000;
+    time_intv.it_interval.tv_sec = 1;
+    time_intv.it_interval.tv_nsec = 0;
+	timerfd_settime(tfd, 0, &time_intv, NULL);  //启动定时器
+
+	epoll_add_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
 }
 
 static void main_work_thread(void* args){
@@ -887,14 +918,7 @@ static void main_work_thread(void* args){
 			return;
 		}
 	}
-
-	while (true){
-		std::map<uint16_t, BaseFactory*>::iterator iter;
-		for (iter = Factorys.begin(); iter != Factorys.end(); ++iter){
-			iter->second->FactoryLoop();
-		}
-		sleep(1);
-	}
+	factorys_timer_run();
 }
 
 int ReactorStart(){

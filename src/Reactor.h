@@ -268,8 +268,8 @@ public:
 #endif // __WINDOWS__
 	virtual bool	FactoryInit() = 0;
 	virtual void	FactoryInited() = 0;
-	virtual void	FactoryLoop() = 0;
 	virtual void	FactoryClose() = 0;
+	virtual void	TimeOut() = 0;
 	virtual BaseProtocol* CreateProtocol() = 0;
 	virtual void	DeleteProtocol(BaseProtocol* proto) = 0;
 };

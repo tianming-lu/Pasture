@@ -292,12 +292,6 @@ static void socket_set_keepalive(int fd){
 	setsockopt(fd, SOL_TCP, TCP_KEEPCNT, (void *)&keepcount, sizeof(keepcount));
 }
 
-static inline void AutoProtocolFree(BaseProtocol* proto) {
-	AutoProtocol* autoproto = (AutoProtocol*)proto;
-	autofree func = autoproto->freefunc;
-	func(autoproto);
-}
-
 static inline void delete_protocol(BaseProtocol* proto, BaseFactory* fc) {
 	if (proto->sockCount == 0) {
 		switch (proto->protoType) {
@@ -305,11 +299,11 @@ static inline void delete_protocol(BaseProtocol* proto, BaseFactory* fc) {
 			break;
 		case SERVER_PROTOCOL:
 			ThreadUnDistribution(proto);
-			fc->DeleteProtocol(proto);
+			fc->ProtocolDelete(proto);
 			break;
 		case AUTO_PROTOCOL:
 			ThreadUnDistribution(proto);
-			AutoProtocolFree(proto);
+			delete proto;
 			break;
 		default:
 			break;
@@ -338,7 +332,6 @@ static void do_close(HSOCKET hsock){
 	}
 	else if (hsock->_conn_stat < SOCKET_CLOSED){
 		BaseProtocol* proto = hsock->user;
-		BaseFactory* factory = proto->factory;
 		int error = 0;
 		socklen_t errlen = sizeof(error);
 		getsockopt(hsock->fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
@@ -347,7 +340,7 @@ static void do_close(HSOCKET hsock){
 			proto->ConnectionFailed(hsock, error);
 		else
     		proto->ConnectionClosed(hsock, error);
-		delete_protocol(proto, factory);
+		delete_protocol(proto, proto->factory);
 	}
     epoll_del_read(hsock->fd, hsock->epoll_fd);
     close(hsock->fd);
@@ -380,27 +373,31 @@ static bool do_ssl_init(HSOCKET hsock, int openssl_type, int verify, const char*
 		return false;
 	}
 	verify? SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_PEER, NULL): SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_NONE, NULL);
+	BIO* bio;
+	X509* cert;
 	if (ca_crt) {
-		BIO * cbio = BIO_new_mem_buf(ca_crt, (int)strlen(ca_crt));
-		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式 DER格式用d2i_X509_bio(cbio, NULL);
+		bio = BIO_new_mem_buf(ca_crt, (int)strlen(ca_crt));
+		cert = PEM_read_bio_X509(bio, NULL, NULL, NULL); //PEM格式 DER格式用d2i_X509_bio(cbio, NULL);
 		X509_STORE * certS = SSL_CTX_get_cert_store(ssl_ctx->ctx);
 		X509_STORE_add_cert(certS, cert);
 		X509_free(cert);
-		BIO_free(cbio);
+		BIO_free(bio);
 		//SSL_CTX_load_verify_locations(ssl_ctx->ctx, ca_crt, NULL);
 	}
 	if (user_crt) {
-		BIO* cbio = BIO_new_mem_buf(user_crt, (int)strlen(user_crt));
-		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式
+		bio = BIO_new_mem_buf(user_crt, (int)strlen(user_crt));
+		cert = PEM_read_bio_X509(bio, NULL, NULL, NULL); //PEM格式
 		SSL_CTX_use_certificate(ssl_ctx->ctx, cert);
-		BIO_free(cbio);
+		X509_free(cert);
+		BIO_free(bio);
 		//SSL_CTX_use_certificate_file(ssl_ctx->ctx, "cacert.pem", SSL_FILETYPE_PEM);
 	}
 	if (pri_key) {
-		BIO* b = BIO_new_mem_buf((void*)pri_key, (int)strlen(pri_key));
-		EVP_PKEY* evpkey = PEM_read_bio_PrivateKey(b, NULL, NULL, NULL);
+		bio = BIO_new_mem_buf((void*)pri_key, (int)strlen(pri_key));
+		EVP_PKEY* evpkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
 		SSL_CTX_use_PrivateKey(ssl_ctx->ctx, evpkey);
-		BIO_free(b);
+		EVP_PKEY_free(evpkey);
+		BIO_free(bio);
 		//SSL_CTX_use_PrivateKey_file(ssl_ctx->ctx, "privkey.pem.unsecure", SSL_FILETYPE_PEM);
 	}
 	ssl_ctx->ssl = SSL_new(ssl_ctx->ctx);
@@ -805,7 +802,7 @@ static void do_accept(HSOCKET listenhsock){
 		memcpy(&hsock->peer_addr, &addr, sizeof(addr));
 		socket_set_keepalive(fd);
 
-        BaseProtocol* proto = fc->CreateProtocol();
+        BaseProtocol* proto = fc->ProtocolCreate();
 		if (!proto->factory) proto->SetFactory(fc, SERVER_PROTOCOL);
 		ThreadDistribution(proto);
 

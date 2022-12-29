@@ -263,19 +263,15 @@ static inline void hsocket_set_keepalive(SOCKET fd) {  //这个函数使用有�
 
 static inline void PostAcceptClient(BaseFactory* fc){
 	HSOCKET IocpSock = NewIOCP_Socket();
-	BaseProtocol* proto = fc->CreateProtocol();
-	if (!IocpSock || !proto){
-		if (proto) fc->DeleteProtocol(proto);
-		if (IocpSock) ReleaseIOCP_Socket(IocpSock);
+	if (!IocpSock){
 		return;
 	}
 	IocpSock->event_type = ACCEPT;
-	IocpSock->user = proto;
+	IocpSock->user = NULL;
 	IocpSock->user_data = fc;
 	IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
 	if (IocpSock->recv_buf == NULL){
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
-		fc->DeleteProtocol(proto);
 		ReleaseIOCP_Socket(IocpSock);
 		return;
 	}
@@ -285,7 +281,6 @@ static inline void PostAcceptClient(BaseFactory* fc){
 
 	IocpSock->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (IocpSock->fd == INVALID_SOCKET){
-		fc->DeleteProtocol(proto);
 		ReleaseIOCP_Socket(IocpSock);
 		return;
 	}
@@ -298,18 +293,11 @@ static inline void PostAcceptClient(BaseFactory* fc){
 
 	if (false == rc){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
-			fc->DeleteProtocol(proto);
 			ReleaseIOCP_Socket(IocpSock);
 			return;
 		}
 	}
 	return;
-}
-
-static inline void AutoProtocolFree(BaseProtocol* proto) {
-	AutoProtocol* autoproto = (AutoProtocol*)proto;
-	autofree func = autoproto->freefunc;
-	func(autoproto);
 }
 
 static inline void delete_protocol(BaseProtocol* proto, BaseFactory* fc) {
@@ -319,11 +307,11 @@ static inline void delete_protocol(BaseProtocol* proto, BaseFactory* fc) {
 			break;
 		case SERVER_PROTOCOL:
 			ThreadUnDistribution(proto);
-			fc->DeleteProtocol(proto);
+			fc->ProtocolDelete(proto);
 			break;
 		case AUTO_PROTOCOL:
 			ThreadUnDistribution(proto);
-			AutoProtocolFree(proto);
+			delete proto;
 			break;
 		default:
 			break;
@@ -337,7 +325,6 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	case ACCEPT:
 		fc = (BaseFactory*)(IocpSock->user_data);
 		PostAcceptClient(fc);
-		fc->DeleteProtocol(IocpSock->user);
 		ReleaseIOCP_Socket(IocpSock);
 		return;
 	case WRITE: {
@@ -445,7 +432,6 @@ static void PostRecv(HSOCKET IocpSock){
 	if (IocpSock->conn_type == TCP_CONN || IocpSock->conn_type == SSL_CONN)
 		return PostRecvTCP(IocpSock);
 	return PostRecvUDP(IocpSock);
-	
 }
 
 static void do_aceept(HSOCKET IocpSock){
@@ -455,19 +441,24 @@ static void do_aceept(HSOCKET IocpSock){
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(fc->Listenfd), sizeof(fc->Listenfd));
 	//hsocket_set_keepalive(IocpSock->fd);
 
-	IocpSock->user_data = NULL;
-	IocpSock->event_type = ACCEPTED;
-	BaseProtocol* proto = IocpSock->user;
-	if (!proto->factory) proto->SetFactory(fc, SERVER_PROTOCOL);
-	ThreadStat* ts = ThreadDistribution(proto);
+	BaseProtocol* proto = fc->ProtocolCreate();
+	if (proto) {
+		IocpSock->user = proto;
+		IocpSock->user_data = NULL;
+		IocpSock->event_type = ACCEPTED;
+		if (!proto->factory) proto->SetFactory(fc, SERVER_PROTOCOL);
+		ThreadStat* ts = ThreadDistribution(proto);
 
-	int nSize = sizeof(IocpSock->peer_addr);
-	getpeername(IocpSock->fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
+		int nSize = sizeof(IocpSock->peer_addr);
+		getpeername(IocpSock->fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
 
-	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
-	PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
-
-	PostAcceptClient(fc);
+		CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
+		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
+		PostAcceptClient(fc);
+	}
+	else {
+		do_close(IocpSock, IocpSock->event_type, -1);
+	}
 }
 
 #ifdef KCP_SUPPORT
@@ -653,27 +644,31 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, int verify, con
 	if (!ssl_ctx->ctx) { free(ssl_ctx); return false; }
 
 	verify ? SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_PEER, NULL): SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_NONE, NULL);
+	BIO* bio;
+	X509* cert;
 	if (ca_crt) {
-		BIO * cbio = BIO_new_mem_buf(ca_crt, (int)strlen(ca_crt));
-		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式 DER格式用d2i_X509_bio(cbio, NULL);
+		bio = BIO_new_mem_buf(ca_crt, (int)strlen(ca_crt));
+		cert = PEM_read_bio_X509(bio, NULL, NULL, NULL); //PEM格式 DER格式用d2i_X509_bio(cbio, NULL);
 		X509_STORE * certS = SSL_CTX_get_cert_store(ssl_ctx->ctx);
 		X509_STORE_add_cert(certS, cert);
 		X509_free(cert);
-		BIO_free(cbio);
+		BIO_free(bio);
 		//SSL_CTX_load_verify_locations(ssl_ctx->ctx, ca_crt, NULL);
 	}
 	if (user_crt) {
-		BIO* cbio = BIO_new_mem_buf(user_crt, (int)strlen(user_crt));
-		X509* cert = PEM_read_bio_X509(cbio, NULL, NULL, NULL); //PEM格式
+		bio = BIO_new_mem_buf(user_crt, (int)strlen(user_crt));
+		cert = PEM_read_bio_X509(bio, NULL, NULL, NULL); //PEM格式
 		SSL_CTX_use_certificate(ssl_ctx->ctx, cert);
-		BIO_free(cbio);
+		X509_free(cert);
+		BIO_free(bio);
 		//SSL_CTX_use_certificate_file(ssl_ctx->ctx, "cacert.pem", SSL_FILETYPE_PEM);
 	}
 	if (pri_key) {
-		BIO* b = BIO_new_mem_buf((void*)pri_key, (int)strlen(pri_key));
-		EVP_PKEY* evpkey = PEM_read_bio_PrivateKey(b, NULL, NULL, NULL);
+		bio = BIO_new_mem_buf((void*)pri_key, (int)strlen(pri_key));
+		EVP_PKEY* evpkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
 		SSL_CTX_use_PrivateKey(ssl_ctx->ctx, evpkey);
-		BIO_free(b);
+		EVP_PKEY_free(evpkey);
+		BIO_free(bio);
 		//SSL_CTX_use_PrivateKey_file(ssl_ctx->ctx, "privkey.pem.unsecure", SSL_FILETYPE_PEM);
 	}
 	ssl_ctx->ssl = SSL_new(ssl_ctx->ctx);
@@ -1020,7 +1015,6 @@ void __STDCALL PostEvent(BaseProtocol* proto, Event_Callback callback, void* eve
 }
 
 void __STDCALL PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long long signal) {
-	BaseFactory* factory = proto->factory;
 	HSIGNAL hsock = (HSIGNAL)malloc(sizeof(Signal_Content));
 	if (hsock) {
 		hsock->conn_type = SIGNAL;
@@ -1068,7 +1062,6 @@ static bool IOCPConnectUDP(BaseProtocol* proto, HSOCKET IocpSock, int listen_por
 
 HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
 	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) return NULL;
-	BaseFactory* fc = proto->factory;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL; 
 
@@ -1123,7 +1116,6 @@ static bool IOCPConnectTCP(BaseProtocol* proto, HSOCKET IocpSock){
 
 HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE conntype){
 	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) return NULL;
-	BaseFactory* fc = proto->factory;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL;
 
@@ -1172,6 +1164,10 @@ static bool IOCPPostSendTCPEx(HSOCKET IocpSock, HSENDBUFF IocpBuff){
 
 static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 	HSENDBUFF IocpBuff = (HSENDBUFF)malloc(sizeof(Socket_Send_Content));
+	if (!IocpBuff) {
+		printf("%s:%d memory malloc error\n", __func__, __LINE__);
+		return false;
+	}
 	memset(IocpBuff, 0x0, sizeof(Socket_Send_Content));
 	if (IocpBuff == NULL) return false;
 	IocpBuff->event_type = WRITE;
@@ -1245,8 +1241,11 @@ bool __STDCALL HsocketSend(HSOCKET hsock, const char* data, int len) {
 bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len) {
 	if (hsock->conn_type == UDP_CONN){
 		HSENDBUFF IocpBuff = (HSENDBUFF)malloc(sizeof(Socket_Send_Content));
+		if (IocpBuff == NULL) {
+			printf("%s:%d memory malloc error\n", __func__, __LINE__);
+			return false;
+		}
 		memset(IocpBuff, 0x0, sizeof(Socket_Send_Content));
-		if (IocpBuff == NULL) return false;
 
 		IocpBuff->databuf.buf = (char*)malloc(len);
 		if (IocpBuff->databuf.buf == NULL) {

@@ -270,19 +270,14 @@ public:
 	virtual void	FactoryInited() = 0;
 	virtual void	FactoryClose() = 0;
 	virtual void	TimeOut() = 0;
-	virtual BaseProtocol* CreateProtocol() = 0;
-	virtual void	DeleteProtocol(BaseProtocol* proto) = 0;
+	virtual BaseProtocol*	ProtocolCreate() = 0;
+	virtual void			ProtocolDelete(BaseProtocol* proto) = 0;
 };
-
-typedef void (*autofree)(BaseProtocol* proto);
 
 class AutoProtocol: public BaseProtocol{
 public:
-	char* buf = NULL;
-	int buflen = 0;
-	autofree freefunc = NULL;
 	AutoProtocol() {};
-	virtual ~AutoProtocol() { if (buf) free(buf); };
+	virtual ~AutoProtocol() {};
 	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
 	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
 	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;

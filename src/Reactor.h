@@ -20,8 +20,8 @@
 
 #define API_EXPORTS
 //#define OPENSSL_SUPPORT
-#define OPENSSL_SERVER 0
-#define OPENSSL_CLIENT 1
+#define SSL_SERVER 0
+#define SSL_CLIENT 1
 
 //#define KCP_SUPPORT
 
@@ -90,7 +90,7 @@ typedef struct {
 #endif
 }ThreadStat;
 
-class BaseFactory;
+class BaseAccepter;
 class BaseProtocol;
 
 typedef struct Timer_Content* HTIMER;
@@ -224,74 +224,19 @@ typedef struct Signal_Content{
 }SIGNAL_CTX, *HSIGNAL;
 #endif // __WINDOWS__
 
-Reactor_API	ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto);
-Reactor_API ThreadStat* __STDCALL ThreadDistributionIndex(BaseProtocol* proto, int index);
-Reactor_API void		__STDCALL ThreadUnDistribution(BaseProtocol* proto);
-
-class BaseProtocol{
-public:
-	BaseFactory*	factory = NULL;
-	ThreadStat*		thread_stat = NULL;
-	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
-	long			sockCount = 0;
-
-public:
-	BaseProtocol() { 
-		this->protoType = SERVER_PROTOCOL;
-	};
-	virtual ~BaseProtocol() {};
-	void	SetFactory(BaseFactory* pfc, PROTOCOL_TPYE prototype) { this->factory = pfc; this->protoType = prototype; }
-	void	ThreadSet() { ThreadDistribution(this); }
-	void	ThreadSet(int index) { ThreadDistributionIndex(this, index); }
-	void	ThreadUnset() { ThreadUnDistribution(this); }
-
-public:
-	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
-	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
-	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
-	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
-};
-
-class BaseFactory{
-public:
-	BaseFactory() {};
-	virtual ~BaseFactory() {};
-	void Set(const char* addr, uint16_t listenport) {snprintf(this->ServerAddr, sizeof(this->ServerAddr), "%s", addr); this->ServerPort = listenport; };
-
-public:
-	char		ServerAddr[40] = { 0x0 };
-	uint16_t	ServerPort = 0;
-#ifdef __WINDOWS__
-	SOCKET		Listenfd = NULL;
-#else
-	int			Listenfd = 0;
-#endif // __WINDOWS__
-	virtual bool	FactoryInit() = 0;
-	virtual void	FactoryInited() = 0;
-	virtual void	FactoryClose() = 0;
-	virtual void	TimeOut() = 0;
-	virtual BaseProtocol*	ProtocolCreate() = 0;
-	virtual void			ProtocolDelete(BaseProtocol* proto) = 0;
-};
-
-class AutoProtocol: public BaseProtocol{
-public:
-	AutoProtocol() {};
-	virtual ~AutoProtocol() {};
-	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
-	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
-	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
-	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
-};
-
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
+	Reactor_API	ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto);
+	Reactor_API ThreadStat* __STDCALL ThreadDistributionIndex(BaseProtocol* proto, int index);
+	Reactor_API void		__STDCALL ThreadUnDistribution(BaseProtocol* proto);
+
 	Reactor_API int		__STDCALL	ReactorStart();
-	Reactor_API int		__STDCALL	FactoryRun(BaseFactory* fc);
-	Reactor_API int		__STDCALL	FactoryStop(BaseFactory* fc);
+	Reactor_API int		__STDCALL	AccepterRun(BaseAccepter* accepter);
+	Reactor_API int		__STDCALL	AccepterClose(BaseAccepter* accepter);
+
 	Reactor_API HSOCKET __STDCALL	HsocketListenUDP(BaseProtocol* proto, int port);
 	Reactor_API HSOCKET	__STDCALL	HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE iotype);
 	Reactor_API bool	__STDCALL	HsocketSend(HSOCKET hsock, const char* data, int len);
@@ -331,5 +276,64 @@ extern "C"
 #ifdef __cplusplus
 }
 #endif
+
+class BaseProtocol{
+public:
+	BaseAccepter*	accepter = NULL;
+	ThreadStat*		thread_stat = NULL;
+	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
+	long			sockCount = 0;
+
+public:
+	BaseProtocol() { 
+		this->protoType = SERVER_PROTOCOL;
+	};
+	virtual ~BaseProtocol() {};
+	void	AccepterSet(BaseAccepter* accepter, PROTOCOL_TPYE prototype) { this->accepter = accepter; this->protoType = prototype; }
+	void	ThreadSet() { ThreadDistribution(this); }
+	void	ThreadSet(int index) { ThreadDistributionIndex(this, index); }
+	void	ThreadUnset() { ThreadUnDistribution(this); }
+
+public:
+	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
+	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
+	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
+	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
+};
+
+class BaseAccepter{
+public:
+	BaseAccepter() {};
+	virtual ~BaseAccepter() {};
+	int Listen(const char* addr, uint16_t listenport) {
+		snprintf(this->ServerAddr, sizeof(this->ServerAddr), "%s", addr);
+		this->ServerPort = listenport;
+		return AccepterRun(this);
+	};
+
+public:
+	char		ServerAddr[40] = { 0x0 };
+	uint16_t	ServerPort = 0;
+#ifdef __WINDOWS__
+	SOCKET		Listenfd = NULL;
+#else
+	int			Listenfd = 0;
+#endif // __WINDOWS__
+	virtual bool	Init() = 0;
+	virtual void	Close() = 0;
+	virtual void	TimeOut() = 0;
+	virtual BaseProtocol*	ProtocolCreate() = 0;
+	virtual void			ProtocolDelete(BaseProtocol* proto) = 0;
+};
+
+class AutoProtocol: public BaseProtocol{
+public:
+	AutoProtocol() {};
+	virtual ~AutoProtocol() {};
+	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
+	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
+	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
+	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
+};
 
 #endif // !_REACTOR_H_

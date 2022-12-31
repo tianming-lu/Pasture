@@ -28,33 +28,35 @@ class EchoProtocol: public BaseProtocol		//继承BaseProtocol
 	};
 };
 
-class EchoFactory: public BaseFactory		//继承BaseFactory
+class EchoAccepter: public BaseAccepter		//继承BaseFactory
 {
 public:
-	bool	FactoryInit() { 
+	bool	Init() { 
 		return true; 
 	};
-	void	FactoryInited() {};
-	void	FactoryLoop() {};
-	void	FactoryClose() {};
-	BaseProtocol* CreateProtocol() {    //accept建立新连接时创建一个EchoProtocol对象
+	void	Close() {};
+	void	TimeOut() {};
+	
+	BaseProtocol* ProtocolCreate() {    //accept建立新连接时创建一个EchoProtocol对象
 		return new EchoProtocol;
 	};
-	void	DeleteProtocol(BaseProtocol* proto) {    //销毁EchoProtocol对象
+	void	ProtocolDelete(BaseProtocol* proto) {    //销毁EchoProtocol对象
 		delete (EchoProtocol*)proto;
 	};
 };
 
-int main()
-{
-    std::cout << "Hello World!\n";
-	ReactorStart();
-	EchoFactory* bfc = new EchoFactory();
-	//bfc->Set(rct, "0.0.0.0", 8000);  //仅ipv4
-	bfc->Set("::", 8000);		//ipv4、ipv6双协议栈
-	FactoryRun(bfc);
-	while (true)
-	{
+int main(){
+	int listen_port = 8000;
+	//启动全局reactor
+	ReactorStart();  
+
+	//创建监听器并监听指定端口
+	EchoAccepter* accepter = new EchoAccepter();
+	//accepter->Listen("0.0.0.0", listen_port);  //仅ipv4
+	accepter->Listen("::", listen_port);		//ipv4、ipv6双协议栈
+
+	printf("正在监听%d端口……", listen_port);
+	while (true){
 #ifdef __WINDOWS__
 		Sleep(10*1000);
 #else

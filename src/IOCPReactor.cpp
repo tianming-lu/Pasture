@@ -37,7 +37,7 @@ HANDLE ListenCompletionPort = NULL;
 DWORD  CompletionPortWorker = 0;
 ThreadStat* ListenThreadStat = NULL;
 std::vector<ThreadStat*> ThreadStats;
-std::map<uint16_t, BaseFactory*> Factorys;
+std::map<uint16_t, BaseAccepter*> Accepters;
 
 static LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 static LPFN_CONNECTEX lpfnConnectEx = NULL;
@@ -261,14 +261,14 @@ static inline void hsocket_set_keepalive(SOCKET fd) {  //这个函数使用有�
 	}
 }
 
-static inline void PostAcceptClient(BaseFactory* fc){
+static inline void PostAcceptClient(BaseAccepter* accepter){
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (!IocpSock){
 		return;
 	}
 	IocpSock->event_type = ACCEPT;
 	IocpSock->user = NULL;
-	IocpSock->user_data = fc;
+	IocpSock->user_data = accepter;
 	IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
 	if (IocpSock->recv_buf == NULL){
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -286,7 +286,7 @@ static inline void PostAcceptClient(BaseFactory* fc){
 	}
 
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
-	bool rc = lpfnAcceptEx(fc->Listenfd, IocpSock->fd,
+	bool rc = lpfnAcceptEx(accepter->Listenfd, IocpSock->fd,
 		IocpSock->databuf.buf, 0,
 		sizeof(struct sockaddr_in6) + 16, sizeof(struct sockaddr_in6) + 16,
 		&IocpSock->databuf.len, &(IocpSock->overlapped));
@@ -300,14 +300,14 @@ static inline void PostAcceptClient(BaseFactory* fc){
 	return;
 }
 
-static inline void delete_protocol(BaseProtocol* proto, BaseFactory* fc) {
+static inline void delete_protocol(BaseProtocol* proto, BaseAccepter* accepter) {
 	if (proto->sockCount == 0) {
 		switch (proto->protoType) {
 		case CLIENT_PROTOCOL:
 			break;
 		case SERVER_PROTOCOL:
 			ThreadUnDistribution(proto);
-			fc->ProtocolDelete(proto);
+			accepter->ProtocolDelete(proto);
 			break;
 		case AUTO_PROTOCOL:
 			ThreadUnDistribution(proto);
@@ -320,11 +320,11 @@ static inline void delete_protocol(BaseProtocol* proto, BaseFactory* fc) {
 }
 
 static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
-	BaseFactory* fc = NULL;
+	BaseAccepter* accpeter = NULL;
 	switch (sock_io_type){
 	case ACCEPT:
-		fc = (BaseFactory*)(IocpSock->user_data);
-		PostAcceptClient(fc);
+		accpeter = (BaseAccepter*)(IocpSock->user_data);
+		PostAcceptClient(accpeter);
 		ReleaseIOCP_Socket(IocpSock);
 		return;
 	case WRITE: {
@@ -349,7 +349,7 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 				HANDLE CompletionPort = user->thread_stat->CompletionPort;
 				PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
 			}
-			delete_protocol(old, old->factory);
+			delete_protocol(old, old->accepter);
 		}
 		return;
 	}
@@ -359,13 +359,13 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 
 	if (IocpSock->fd != INVALID_SOCKET){
 		BaseProtocol* proto = IocpSock->user;
-		fc = proto->factory;
+		accpeter = proto->accepter;
 		proto->sockCount--;
 		if (READ == IocpSock->event_type)
 			proto->ConnectionClosed(IocpSock, err);
 		else
 			proto->ConnectionFailed(IocpSock, err);
-		delete_protocol(proto, fc);
+		delete_protocol(proto, accpeter);
 	}
 	ReleaseIOCP_Socket(IocpSock);
 }
@@ -435,18 +435,18 @@ static void PostRecv(HSOCKET IocpSock){
 }
 
 static void do_aceept(HSOCKET IocpSock){
-	BaseFactory* fc = (BaseFactory*)IocpSock->user_data;
+	BaseAccepter* accpeter = (BaseAccepter*)IocpSock->user_data;
 	
 	//连接成功后刷新套接字属性
-	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(fc->Listenfd), sizeof(fc->Listenfd));
+	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accpeter->Listenfd), sizeof(accpeter->Listenfd));
 	//hsocket_set_keepalive(IocpSock->fd);
 
-	BaseProtocol* proto = fc->ProtocolCreate();
+	BaseProtocol* proto = accpeter->ProtocolCreate();
 	if (proto) {
 		IocpSock->user = proto;
 		IocpSock->user_data = NULL;
 		IocpSock->event_type = ACCEPTED;
-		if (!proto->factory) proto->SetFactory(fc, SERVER_PROTOCOL);
+		if (!proto->accepter) proto->AccepterSet(accpeter, SERVER_PROTOCOL);
 		ThreadStat* ts = ThreadDistribution(proto);
 
 		int nSize = sizeof(IocpSock->peer_addr);
@@ -454,7 +454,7 @@ static void do_aceept(HSOCKET IocpSock){
 
 		CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
-		PostAcceptClient(fc);
+		PostAcceptClient(accpeter);
 	}
 	else {
 		do_close(IocpSock, IocpSock->event_type, -1);
@@ -640,7 +640,7 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, int verify, con
 		return false;
 	}
 	memset(ssl_ctx, 0x0, sizeof(SSL_Content));
-	ssl_ctx->ctx = openssl_type == OPENSSL_CLIENT? SSL_CTX_new(SSLv23_client_method()): SSL_CTX_new(SSLv23_server_method());
+	ssl_ctx->ctx = openssl_type == SSL_CLIENT? SSL_CTX_new(SSLv23_client_method()): SSL_CTX_new(SSLv23_server_method());
 	if (!ssl_ctx->ctx) { free(ssl_ctx); return false; }
 
 	verify ? SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_PEER, NULL): SSL_CTX_set_verify(ssl_ctx->ctx, SSL_VERIFY_NONE, NULL);
@@ -690,11 +690,11 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, int verify, con
 		return false;
 	}
 	SSL_set_bio(ssl_ctx->ssl, ssl_ctx->rbio, ssl_ctx->wbio);
-	openssl_type == OPENSSL_CLIENT? SSL_set_connect_state(ssl_ctx->ssl): SSL_set_accept_state(ssl_ctx->ssl);
+	openssl_type == SSL_CLIENT? SSL_set_connect_state(ssl_ctx->ssl): SSL_set_accept_state(ssl_ctx->ssl);
 	IocpSock->user_data = ssl_ctx;
 	IocpSock->conn_type = SSL_CONN;
 
-	if (openssl_type == OPENSSL_CLIENT) {
+	if (openssl_type == SSL_CLIENT) {
 		SSL_do_handshake(ssl_ctx->ssl);
 		ssl_do_write(ssl_ctx, IocpSock);
 	}
@@ -702,7 +702,7 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, int verify, con
 }
 
 static void Hsocket_upto_SSL_Client(HSOCKET IocpSock) {
-	if (!Hsocket_SSL_init(IocpSock, OPENSSL_CLIENT, 0, NULL, NULL, NULL))
+	if (!Hsocket_SSL_init(IocpSock, SSL_CLIENT, 0, NULL, NULL, NULL))
 		return do_close(IocpSock, IocpSock->event_type, 0);
 	PostRecv(IocpSock);
 }
@@ -849,19 +849,19 @@ static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
 	}
 }
 
-static void factorys_timer_callback(HTIMER timer, BaseProtocol* proto) {
-	std::map<uint16_t, BaseFactory*>::iterator iter;
-	for (iter = Factorys.begin(); iter != Factorys.end(); ++iter) {
+static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto) {
+	std::map<uint16_t, BaseAccepter*>::iterator iter;
+	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
 	}
 }
 
-static void factorys_timer_run() {
+static void accepters_timer_run() {
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock) {
 		hsock->conn_type = TIMER;
 		hsock->user = NULL;
-		hsock->call = factorys_timer_callback;
+		hsock->call = accepter_timer_callback;
 		hsock->thread_stat = ListenThreadStat;
 		hsock->close = 0;
 		hsock->lock = 0;
@@ -870,7 +870,6 @@ static void factorys_timer_run() {
 }
 
 DWORD WINAPI mainIOCPServer(LPVOID pParam){
-
 	ListenThreadStat = (ThreadStat*)malloc(sizeof(ThreadStat));
 	if (!ListenThreadStat) {
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -893,7 +892,7 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam){
 		}
 		CloseHandle(ThreadHandle);
 	}
-	factorys_timer_run();
+	accepters_timer_run();
 	return 0;
 }
 
@@ -958,29 +957,28 @@ int __STDCALL ReactorStart(){
 	return 0;
 }
 
-int __STDCALL FactoryRun(BaseFactory* fc){
-	if (!fc->FactoryInit()) return -1;
+int __STDCALL AccepterRun(BaseAccepter* accepter){
+	if (!accepter->Init()) return -1;
 
-	if (fc->ServerPort != 0){
-		fc->Listenfd = get_listen_sock(fc->ServerAddr, fc->ServerPort);
-		if (fc->Listenfd == SOCKET_ERROR) return -2;
+	if (accepter->ServerPort != 0){
+		accepter->Listenfd = get_listen_sock(accepter->ServerAddr, accepter->ServerPort);
+		if (accepter->Listenfd == SOCKET_ERROR) return -2;
 
-		CreateIoCompletionPort((HANDLE)fc->Listenfd, ListenCompletionPort, (ULONG_PTR)fc->Listenfd, 0);
+		CreateIoCompletionPort((HANDLE)accepter->Listenfd, ListenCompletionPort, (ULONG_PTR)accepter->Listenfd, 0);
 		for (DWORD i = 0; i < CompletionPortWorker; i++)
-			PostAcceptClient(fc);
+			PostAcceptClient(accepter);
 	}
-	fc->FactoryInited();
-	Factorys.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
+	Accepters.insert(std::pair<uint16_t, BaseAccepter*>(accepter->ServerPort, accepter));
 	return 0;
 }
 
-int __STDCALL FactoryStop(BaseFactory* fc){
-	std::map<uint16_t, BaseFactory*>::iterator iter;
-	iter = Factorys.find(fc->ServerPort);
-	if (iter != Factorys.end()){
-		Factorys.erase(iter);
+int __STDCALL AccepterClose(BaseAccepter* accpeter){
+	std::map<uint16_t, BaseAccepter*>::iterator iter;
+	iter = Accepters.find(accpeter->ServerPort);
+	if (iter != Accepters.end()){
+		Accepters.erase(iter);
 	}
-	fc->FactoryClose();
+	accpeter->Close();
 	return 0;
 }
 

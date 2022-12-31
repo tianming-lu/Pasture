@@ -35,7 +35,7 @@ int epoll_listen_fd = 0;
 int EpollWorker = 0;
 ThreadStat* ListenThreadStat = NULL;
 std::vector<ThreadStat*> ThreadStats;
-std::map<uint16_t, BaseFactory*> Factorys;
+std::map<uint16_t, BaseAccepter*> Accepters;
 
 enum SOCKET_STAT:char{
 	SOCKET_UNKNOWN = 0,
@@ -292,14 +292,14 @@ static void socket_set_keepalive(int fd){
 	setsockopt(fd, SOL_TCP, TCP_KEEPCNT, (void *)&keepcount, sizeof(keepcount));
 }
 
-static inline void delete_protocol(BaseProtocol* proto, BaseFactory* fc) {
+static inline void delete_protocol(BaseProtocol* proto, BaseAccepter* accpeter) {
 	if (proto->sockCount == 0) {
 		switch (proto->protoType) {
 		case CLIENT_PROTOCOL:
 			break;
 		case SERVER_PROTOCOL:
 			ThreadUnDistribution(proto);
-			fc->ProtocolDelete(proto);
+			accpeter->ProtocolDelete(proto);
 			break;
 		case AUTO_PROTOCOL:
 			ThreadUnDistribution(proto);
@@ -327,7 +327,7 @@ static void do_close(HSOCKET hsock){
 			hsock->_conn_stat = SOCKET_REBIND;
 			epoll_add_connect(hsock);
 		}
-		delete_protocol(old, old->factory);
+		delete_protocol(old, old->accepter);
 		return;
 	}
 	else if (hsock->_conn_stat < SOCKET_CLOSED){
@@ -340,7 +340,7 @@ static void do_close(HSOCKET hsock){
 			proto->ConnectionFailed(hsock, error);
 		else
     		proto->ConnectionClosed(hsock, error);
-		delete_protocol(proto, proto->factory);
+		delete_protocol(proto, proto->accepter);
 	}
     epoll_del_read(hsock->fd, hsock->epoll_fd);
     close(hsock->fd);
@@ -367,7 +367,7 @@ static bool do_ssl_init(HSOCKET hsock, int openssl_type, int verify, const char*
 	if (!ssl_ctx) { return false; }
 
 	memset(ssl_ctx, 0, sizeof(struct SSL_Content));
-	ssl_ctx->ctx = openssl_type == OPENSSL_CLIENT? SSL_CTX_new(SSLv23_client_method()): SSL_CTX_new(SSLv23_server_method());
+	ssl_ctx->ctx = openssl_type == SSL_CLIENT? SSL_CTX_new(SSLv23_client_method()): SSL_CTX_new(SSLv23_server_method());
 	if (ssl_ctx->ctx == NULL) {
 		free(ssl_ctx);
 		return false;
@@ -407,18 +407,18 @@ static bool do_ssl_init(HSOCKET hsock, int openssl_type, int verify, const char*
 		return false;
 	}
 	SSL_set_fd(ssl_ctx->ssl, hsock->fd);
-	openssl_type == OPENSSL_CLIENT? SSL_set_connect_state(ssl_ctx->ssl): SSL_set_accept_state(ssl_ctx->ssl);
+	openssl_type == SSL_CLIENT? SSL_set_connect_state(ssl_ctx->ssl): SSL_set_accept_state(ssl_ctx->ssl);
 	hsock->user_data = ssl_ctx;
 	hsock->conn_type = SSL_CONN;
 	
-	if (openssl_type == OPENSSL_CLIENT){
+	if (openssl_type == SSL_CLIENT){
 		SSL_do_handshake(ssl_ctx->ssl);
 	}
 	return true;
 }
 
 static void do_ssl_upto_client(HSOCKET hsock){
-	if (!do_ssl_init(hsock, OPENSSL_CLIENT, 0, NULL, NULL, NULL)){
+	if (!do_ssl_init(hsock, SSL_CLIENT, 0, NULL, NULL, NULL)){
 		do_close(hsock);
 		return;
 	}
@@ -781,13 +781,13 @@ static void do_signal(HSIGNAL hsock){
 }
 
 static void do_accept(HSOCKET listenhsock){
-	BaseFactory* fc = (BaseFactory*)listenhsock->user_data;
+	BaseAccepter* accpeter = (BaseAccepter*)listenhsock->user_data;
     struct sockaddr_in6 addr;
 	socklen_t len = sizeof(addr);
    	int fd = 0;
 
 	while (1){
-	    fd = accept(fc->Listenfd, (struct sockaddr *)&addr, &len);
+	    fd = accept(accpeter->Listenfd, (struct sockaddr *)&addr, &len);
 		if (fd < 0) break;
         HSOCKET hsock = new_hsockt();
 		if (hsock == NULL) {
@@ -802,8 +802,8 @@ static void do_accept(HSOCKET listenhsock){
 		memcpy(&hsock->peer_addr, &addr, sizeof(addr));
 		socket_set_keepalive(fd);
 
-        BaseProtocol* proto = fc->ProtocolCreate();
-		if (!proto->factory) proto->SetFactory(fc, SERVER_PROTOCOL);
+        BaseProtocol* proto = accpeter->ProtocolCreate();
+		if (!proto->accepter) proto->AccepterSet(accpeter, SERVER_PROTOCOL);
 		ThreadDistribution(proto);
 
         hsock->fd = fd;
@@ -864,14 +864,14 @@ static void read_work_thread(void* args){
 	}
 }
 
-static void factorys_timer_callback(HTIMER timer, BaseProtocol* proto) {
-	std::map<uint16_t, BaseFactory*>::iterator iter;
-	for (iter = Factorys.begin(); iter != Factorys.end(); ++iter) {
+static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto) {
+	std::map<uint16_t, BaseAccepter*>::iterator iter;
+	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
 	}
 }
 
-static void factorys_timer_run(){
+static void accepters_timer_run(){
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock == NULL) 
 		return;
@@ -883,7 +883,7 @@ static void factorys_timer_run(){
 	hsock->fd = tfd;
 	hsock->conn_type = TIMER;
 	hsock->user = NULL;
-	hsock->call = factorys_timer_callback;
+	hsock->call = accepter_timer_callback;
 	hsock->epoll_fd = ListenThreadStat->epoll_fd;
 	hsock->_conn_stat = 0;
 
@@ -915,7 +915,7 @@ static void main_work_thread(void* args){
 			return;
 		}
 	}
-	factorys_timer_run();
+	accepters_timer_run();
 }
 
 int ReactorStart(){
@@ -956,37 +956,36 @@ int ReactorStart(){
 	return 0;
 }
 
-int	FactoryRun(BaseFactory* fc){
-	if (!fc->FactoryInit())
+int	AccepterRun(BaseAccepter* accepter){
+	if (!accepter->Init())
 		return -1;
-	if (fc->ServerPort > 0){
-		fc->Listenfd = get_listen_sock(fc->ServerAddr, fc->ServerPort);
-		if (fc->Listenfd < 0){
-			printf("%s:%d %d\n", __func__, __LINE__, fc->Listenfd);
+	if (accepter->ServerPort > 0){
+		accepter->Listenfd = get_listen_sock(accepter->ServerAddr, accepter->ServerPort);
+		if (accepter->Listenfd < 0){
+			printf("%s:%d %d\n", __func__, __LINE__, accepter->Listenfd);
 			return -2;
 		}
 		HSOCKET hsock = new_hsockt();
 		if (hsock == NULL) {
-			close(fc->Listenfd);
+			close(accepter->Listenfd);
 			return -3;
 		}
-		hsock->fd = fc->Listenfd;
-		hsock->user_data = fc;
+		hsock->fd = accepter->Listenfd;
+		hsock->user_data = accepter;
 		hsock->_conn_stat = SOCKET_ACCEPTING;
 		epoll_add_accept(hsock);
 	}
-	fc->FactoryInited();
-	Factorys.insert(std::pair<uint16_t, BaseFactory*>(fc->ServerPort, fc));
+	Accepters.insert(std::pair<uint16_t, BaseAccepter*>(accepter->ServerPort, accepter));
 	return 0;
 }
 
-int FactoryStop(BaseFactory* fc){
-	std::map<uint16_t, BaseFactory*>::iterator iter;
-	iter = Factorys.find(fc->ServerPort);
-	if (iter != Factorys.end()){
-		Factorys.erase(iter);
+int AccepterClose(BaseAccepter* accpeter){
+	std::map<uint16_t, BaseAccepter*>::iterator iter;
+	iter = Accepters.find(accpeter->ServerPort);
+	if (iter != Accepters.end()){
+		Accepters.erase(iter);
 	}
-	fc->FactoryClose();
+	accpeter->Close();
 	return 0;
 }
 

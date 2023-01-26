@@ -38,7 +38,10 @@ public:
 	void	TimeOut() {};
 	
 	BaseProtocol* ProtocolCreate() {    //accept建立新连接时创建一个EchoProtocol对象
-		return new EchoProtocol;
+		EchoProtocol* proto = new EchoProtocol;
+		//proto->ThreadSet();   //自动分配工作线程
+		//proto->ThreadSet(0);   //分配到指定工作线程， 0 ~ ActorThreadWorker - 1 
+		return proto;
 	};
 	void	ProtocolDelete(BaseProtocol* proto) {    //销毁EchoProtocol对象
 		delete (EchoProtocol*)proto;

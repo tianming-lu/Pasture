@@ -32,9 +32,8 @@
 #define UNBIND 5
 #define REBIND 6
 
-
+int  ActorThreadWorker = 0;
 HANDLE ListenCompletionPort = NULL;
-DWORD  CompletionPortWorker = 0;
 ThreadStat* ListenThreadStat = NULL;
 std::vector<ThreadStat*> ThreadStats;
 std::map<uint16_t, BaseAccepter*> Accepters;
@@ -73,7 +72,7 @@ ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto) {
 	if (proto->thread_stat) return proto->thread_stat;
 	ThreadStat* tsa, * tsb;
 	tsa = ThreadStats[0];
-	for (size_t i = 1; i < CompletionPortWorker; i++) {
+	for (int i = 1; i < ActorThreadWorker; i++) {
 		tsb = ThreadStats[i];
 		tsa = tsa->ProtocolCount <= tsb->ProtocolCount ? tsa : tsb;
 	}
@@ -172,6 +171,7 @@ static inline HSOCKET NewIOCP_Socket(){
 }
 
 static inline void ReleaseIOCP_Socket(HSOCKET IocpSock){
+#if defined OPENSSL_SUPPORT || defined KCP_SUPPORT
 	switch (IocpSock->conn_type) {
 #ifdef OPENSSL_SUPPORT
 	case SSL_CONN: {
@@ -200,6 +200,7 @@ static inline void ReleaseIOCP_Socket(HSOCKET IocpSock){
 	default:
 		break;
 	}
+#endif
 	SOCKET fd = IocpSock->fd;
 	if (fd != INVALID_SOCKET && fd != NULL) closesocket(fd);
 	if (IocpSock->recv_buf) free(IocpSock->recv_buf);
@@ -373,17 +374,12 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 static bool ResetIocp_Buff(HSOCKET IocpSock){
 	memset(&IocpSock->overlapped, 0, sizeof(OVERLAPPED));
 	if (IocpSock->recv_buf == NULL){
-		if (IocpSock->databuf.buf != NULL){
-			IocpSock->recv_buf = IocpSock->databuf.buf;
+		IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
+		if (IocpSock->recv_buf == NULL) {
+			printf("%s:%d memory malloc error\n", __func__, __LINE__);
+			return false;
 		}
-		else{
-			IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
-			if (IocpSock->recv_buf == NULL) {
-				printf("%s:%d memory malloc error\n", __func__, __LINE__);
-				return false;
-			}
-			IocpSock->size = DATA_BUFSIZE;
-		}
+		IocpSock->size = DATA_BUFSIZE;
 	}
 	IocpSock->databuf.len = IocpSock->size - IocpSock->offset;
 	if (IocpSock->databuf.len == 0){
@@ -795,8 +791,7 @@ static void ProcessIO(HSOCKET IocpSock, char sock_io_type, DWORD dwIoSize){
 
 /////////////////////////////////////////////////////////////////////////
 //服务线程
-DWORD WINAPI serverWorkerThread(LPVOID pParam){
-	ThreadStat* thread_stat = (ThreadStat*)pParam;
+DWORD WINAPI serverWorkerThread(ThreadStat* thread_stat){
 	HANDLE	CompletionPort = thread_stat->CompletionPort;
 	DWORD	dwIoSize = 0;
 	void* CompletKey = NULL;
@@ -806,7 +801,7 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 	DWORD err = 0;
 	while (true){
 		bRet = GetQueuedCompletionStatus(CompletionPort, &dwIoSize, (PULONG_PTR)&CompletKey, (LPOVERLAPPED*)&OverLapped, INFINITE);
-		if (!OverLapped) {
+		if (!OverLapped) {  //Overlapped为NULL，说明当前消息不是套接字IO完成消息，而是timer、event、signal
 			switch (*(CONN_TYPE*)CompletKey)
 			{
 			case TIMER:
@@ -841,8 +836,7 @@ DWORD WINAPI serverWorkerThread(LPVOID pParam){
 	return 0;
 }
 
-static void timer_queue_callback(PVOID lpParam, BOOLEAN TimerOrWaitFired) {
-	HTIMER hsock = (HTIMER)lpParam;
+static void timer_queue_callback(HTIMER hsock, BOOLEAN TimerOrWaitFired) {
 	ThreadStat* ts = hsock->thread_stat;
 	if (LONGTRYLOCK(hsock->lock)) {
 		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
@@ -869,7 +863,7 @@ static void accepters_timer_run() {
 	}
 }
 
-DWORD WINAPI mainIOCPServer(LPVOID pParam){
+static int runIOCPServer(){
 	ListenThreadStat = (ThreadStat*)malloc(sizeof(ThreadStat));
 	if (!ListenThreadStat) {
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -878,15 +872,15 @@ DWORD WINAPI mainIOCPServer(LPVOID pParam){
 	ListenThreadStat->CompletionPort = ListenCompletionPort;
 	ListenThreadStat->ProtocolCount = 0;
 	HANDLE ThreadHandle = NULL;
-	ThreadHandle = CreateThread(NULL, 0, serverWorkerThread, ListenThreadStat, 0, NULL);
+	ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ListenThreadStat, 0, NULL);
 	if (NULL == ThreadHandle) {
 		return -4;
 	}
 	CloseHandle(ThreadHandle);
 
-	for (DWORD i = 0; i < CompletionPortWorker; i++){
+	for (int i = 0; i < ActorThreadWorker; i++){
 	//for (unsigned int i = 0; i < 1; i++){
-		ThreadHandle = CreateThread(NULL, 0, serverWorkerThread, ThreadStats[i], 0, NULL);
+		ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ThreadStats[i], 0, NULL);
 		if (NULL == ThreadHandle) {
 			return -4;
 		}
@@ -906,11 +900,11 @@ int __STDCALL ReactorStart(){
 
 	SYSTEM_INFO sysInfor;
 	GetSystemInfo(&sysInfor);
-	CompletionPortWorker = sysInfor.dwNumberOfProcessors;
+	ActorThreadWorker = sysInfor.dwNumberOfProcessors;
 
-	ThreadStats.reserve(CompletionPortWorker);
+	ThreadStats.reserve(ActorThreadWorker);
 	ThreadStat* ts;
-	for (DWORD i = 0; i < CompletionPortWorker; i++) {
+	for (int i = 0; i < ActorThreadWorker; i++) {
 		ts = (ThreadStat*)malloc(sizeof(ThreadStat));
 		if (!ts) {
 			printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -947,14 +941,7 @@ int __STDCALL ReactorStart(){
 	SSL_load_error_strings();
 	OpenSSL_add_all_algorithms();
 #endif
-
-	HANDLE ThreadHandle;
-	ThreadHandle = CreateThread(NULL, 0, mainIOCPServer, NULL, 0, NULL);
-	if (NULL == ThreadHandle) {
-		return -5;
-	}
-	CloseHandle(ThreadHandle);
-	return 0;
+	return runIOCPServer();
 }
 
 int __STDCALL AccepterRun(BaseAccepter* accepter){
@@ -965,7 +952,7 @@ int __STDCALL AccepterRun(BaseAccepter* accepter){
 		if (accepter->Listenfd == SOCKET_ERROR) return -2;
 
 		CreateIoCompletionPort((HANDLE)accepter->Listenfd, ListenCompletionPort, (ULONG_PTR)accepter->Listenfd, 0);
-		for (DWORD i = 0; i < CompletionPortWorker; i++)
+		for (int i = 0; i < ActorThreadWorker; i++)
 			PostAcceptClient(accepter);
 	}
 	Accepters.insert(std::pair<uint16_t, BaseAccepter*>(accepter->ServerPort, accepter));

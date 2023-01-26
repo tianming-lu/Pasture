@@ -20,8 +20,10 @@
 
 #define API_EXPORTS
 //#define OPENSSL_SUPPORT
+#ifdef OPENSSL_SUPPORT
 #define SSL_SERVER 0
 #define SSL_CLIENT 1
+#endif
 
 //#define KCP_SUPPORT
 
@@ -89,6 +91,8 @@ typedef struct {
 	int		epoll_fd;
 #endif
 }ThreadStat;
+
+extern int ActorThreadWorker;
 
 class BaseAccepter;
 class BaseProtocol;

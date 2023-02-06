@@ -34,7 +34,6 @@
 
 int  ActorThreadWorker = 0;
 HANDLE ListenCompletionPort = NULL;
-ThreadStat* ListenThreadStat = NULL;
 std::vector<ThreadStat*> ThreadStats;
 std::map<uint16_t, BaseAccepter*> Accepters;
 
@@ -756,11 +755,11 @@ static void do_timer(HTIMER hsock) {
 		Timer_Callback callback = (Timer_Callback)hsock->call;
 		callback(hsock, hsock->user);
 		LONGUNLOCK(hsock->lock);
+		if (!hsock->close && hsock->once == 0) 
+			return;
 	}	
-	else {
-		DeleteTimerQueueTimer(NULL, hsock->timer, INVALID_HANDLE_VALUE);
-		free(hsock);
-	}
+	DeleteTimerQueueTimer(NULL, hsock->timer, INVALID_HANDLE_VALUE);
+	free(hsock);
 }
 
 static void ProcessIO(HSOCKET IocpSock, char sock_io_type, DWORD dwIoSize){
@@ -791,8 +790,7 @@ static void ProcessIO(HSOCKET IocpSock, char sock_io_type, DWORD dwIoSize){
 
 /////////////////////////////////////////////////////////////////////////
 //服务线程
-DWORD WINAPI serverWorkerThread(ThreadStat* thread_stat){
-	HANDLE	CompletionPort = thread_stat->CompletionPort;
+DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 	DWORD	dwIoSize = 0;
 	void* CompletKey = NULL;
 	void* OverLapped = NULL;		//IO数据,用于发起接收重叠操作
@@ -837,9 +835,8 @@ DWORD WINAPI serverWorkerThread(ThreadStat* thread_stat){
 }
 
 static void timer_queue_callback(HTIMER hsock, BOOLEAN TimerOrWaitFired) {
-	ThreadStat* ts = hsock->thread_stat;
 	if (LONGTRYLOCK(hsock->lock)) {
-		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)hsock, NULL);
+		PostQueuedCompletionStatus(hsock->completion_port, 0, (ULONG_PTR)hsock, NULL);
 	}
 }
 
@@ -851,28 +848,23 @@ static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto) {
 }
 
 static void accepters_timer_run() {
+#define ACCEPTOR_TIMER_OUT 1000
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock) {
 		hsock->conn_type = TIMER;
+		hsock->once = ACCEPTOR_TIMER_OUT == 0? 1: 0;
 		hsock->user = NULL;
 		hsock->call = accepter_timer_callback;
-		hsock->thread_stat = ListenThreadStat;
+		hsock->completion_port = ListenCompletionPort;
 		hsock->close = 0;
 		hsock->lock = 0;
-		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, 0, 1000, 0);
+		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, 1000, ACCEPTOR_TIMER_OUT, 0);
 	}
 }
 
 static int runIOCPServer(){
-	ListenThreadStat = (ThreadStat*)malloc(sizeof(ThreadStat));
-	if (!ListenThreadStat) {
-		printf("%s:%d memory malloc error\n", __func__, __LINE__);
-		return -1;
-	}
-	ListenThreadStat->CompletionPort = ListenCompletionPort;
-	ListenThreadStat->ProtocolCount = 0;
 	HANDLE ThreadHandle = NULL;
-	ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ListenThreadStat, 0, NULL);
+	ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ListenCompletionPort, 0, NULL);
 	if (NULL == ThreadHandle) {
 		return -4;
 	}
@@ -880,7 +872,7 @@ static int runIOCPServer(){
 
 	for (int i = 0; i < ActorThreadWorker; i++){
 	//for (unsigned int i = 0; i < 1; i++){
-		ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ThreadStats[i], 0, NULL);
+		ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ThreadStats[i]->CompletionPort, 0, NULL);
 		if (NULL == ThreadHandle) {
 			return -4;
 		}
@@ -973,9 +965,10 @@ HTIMER	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Tim
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock) {
 		hsock->conn_type = TIMER;
+		hsock->once = looptime == 0 ? 1 : 0;
 		hsock->user = proto;
 		hsock->call = callback;
-		hsock->thread_stat = proto->thread_stat;
+		hsock->completion_port = proto ? proto->thread_stat->CompletionPort : ListenCompletionPort;
 		hsock->close = 0;
 		hsock->lock = 0;
 		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, duetime, looptime, 0);

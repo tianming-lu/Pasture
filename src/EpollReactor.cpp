@@ -24,6 +24,7 @@
 #include <sys/prctl.h>
 #include <netdb.h>
 #include <vector>
+#include <map>
 #ifdef OPENSSL_SUPPORT
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -34,7 +35,6 @@
 
 int ActorThreadWorker = 0;
 int epoll_listen_fd = 0;
-ThreadStat* ListenThreadStat = NULL;
 std::vector<ThreadStat*> ThreadStats;
 std::map<uint16_t, BaseAccepter*> Accepters;
 
@@ -223,13 +223,6 @@ static inline void epoll_add_timer_event_signal(void* ptr, int fd, int epoll_fd)
 	ev.events = EPOLLIN | EPOLLET;
 	ev.data.ptr = ptr;
 	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev);	
-}
-
-static inline void epoll_mod_timer_event_signal(void* ptr, int fd, int epoll_fd) {
-	struct epoll_event ev;
-	ev.events = EPOLLIN | EPOLLET;
-	ev.data.ptr = ptr;
-	epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev);	
 }
 
 static inline void epoll_add_accept(HSOCKET hsock) {
@@ -732,9 +725,8 @@ static void do_timer(HTIMER hsock){
 	if (hsock->_conn_stat < SOCKET_CLOSED){
 		Timer_Callback call = hsock->call;
 		call(hsock, hsock->user);
-		if (hsock->_conn_stat < SOCKET_CLOSED){
+		if (hsock->_conn_stat < SOCKET_CLOSED && hsock->once == 0){
 			read(hsock->fd, &value, sizeof(uint64_t)); //必须读取，否则定时器异常
-			epoll_mod_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
 			return;
 		}
 	}
@@ -797,15 +789,17 @@ static int do_accept(HSOCKET listenhsock){
 	return 1;
 }
 
-static void read_work_thread(ThreadStat* ts){
-	prctl(PR_SET_NAME, ts == ListenThreadStat ? "accepter" :"worker");
+static void read_work_thread(int* efd){
+	int epoll_fd = *efd;
+	prctl(PR_SET_NAME, epoll_fd == epoll_listen_fd ? "accepter" :"worker");
+
     int i = 0,n = 0, ret = 0;
     struct epoll_event *pev = (struct epoll_event*)malloc(sizeof(struct epoll_event) * 64);
 	if(pev == NULL) { return ; }
     HSOCKET		hsock = NULL;
 	int			events = 0;
 	while (1){
-		n = epoll_wait(ts->epoll_fd, pev, 64, -1);
+		n = epoll_wait(epoll_fd, pev, 64, -1);
 		for(i = 0; i < n; i++) {
             hsock = (HSOCKET)pev[i].data.ptr;
 			events = pev[i].events;
@@ -872,8 +866,9 @@ static void accepters_timer_run(){
 	hsock->conn_type = TIMER;
 	hsock->user = NULL;
 	hsock->call = accepter_timer_callback;
-	hsock->epoll_fd = ListenThreadStat->epoll_fd;
+	hsock->epoll_fd = epoll_listen_fd;
 	hsock->_conn_stat = 0;
+	hsock->once = 0;
 
     struct itimerspec time_intv; //用来存储时间
     time_intv.it_value.tv_sec = 0;
@@ -892,13 +887,13 @@ static int runEpollServer(){
 	pthread_attr_t rattr;
    	pthread_t rtid;
 	pthread_attr_init(&rattr);
-	if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, ListenThreadStat)) != 0){
+	if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, &epoll_listen_fd)) != 0){
 		return -1;
 	}
 
     for (i = 0; i < ActorThreadWorker; i++){
 		pthread_attr_init(&rattr);
-		if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, ThreadStats[i])) != 0){
+		if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, &(ThreadStats[i]->epoll_fd))) != 0){
 			return -1;
 		}
 	}
@@ -910,11 +905,6 @@ int ReactorStart(){
     epoll_listen_fd = epoll_create(64);
 	if(epoll_listen_fd < 0)
 		return -1;
-	ListenThreadStat = (ThreadStat*)malloc(sizeof(ThreadStat));
-	if (!ListenThreadStat) {
-		return -2;
-	}
-	ListenThreadStat->epoll_fd = epoll_listen_fd;
 
 	ActorThreadWorker = get_nprocs_conf();
 	ThreadStats.reserve(ActorThreadWorker);
@@ -1082,8 +1072,9 @@ HTIMER TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callbac
 	hsock->conn_type = TIMER;
 	hsock->user = proto;
 	hsock->call = callback;
-	hsock->epoll_fd = proto->thread_stat->epoll_fd;
+	hsock->epoll_fd = proto ? proto->thread_stat->epoll_fd : epoll_listen_fd;
 	hsock->_conn_stat = 0;
+	hsock->once = looptime == 0 ? 1 : 0;
 
 	duetime = duetime == 0? 1 : duetime;
     struct itimerspec time_intv; //用来存储时间

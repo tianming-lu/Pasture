@@ -41,7 +41,8 @@
 #define Reactor_API
 #endif // __WINDOWS__
 
-#include <map>
+#include <stdio.h>
+#include <stdlib.h>
 #ifdef __WINDOWS__
 #define WIN32_LEAN_AND_MEAN
 #include "windows.h"
@@ -145,10 +146,11 @@ typedef struct Socket_Content {
 
 typedef struct Timer_Content {
 	CONN_TYPE		conn_type;
+	char			once;
 	BaseProtocol*	user;
 	Timer_Callback	call;
 	HANDLE			timer;
-	ThreadStat*		thread_stat;
+	HANDLE			completion_port;
 	long			lock;
 	long			close;
 }*HTIMER;
@@ -203,6 +205,7 @@ typedef struct Socket_Content {
 typedef struct Timer_Content{
 	CONN_TYPE	conn_type;
 	unsigned char _conn_stat;
+	char once;
 	int	fd;
 	int epoll_fd;
 	BaseProtocol* user;
@@ -309,15 +312,15 @@ class BaseAccepter{
 public:
 	BaseAccepter() {};
 	virtual ~BaseAccepter() {};
-	int Listen(const char* addr, uint16_t listenport) {
+	int Listen(const char* addr, unsigned short listenport) {
 		snprintf(this->ServerAddr, sizeof(this->ServerAddr), "%s", addr);
 		this->ServerPort = listenport;
 		return AccepterRun(this);
 	};
 
 public:
-	char		ServerAddr[40] = { 0x0 };
-	uint16_t	ServerPort = 0;
+	char			ServerAddr[40] = { 0x0 };
+	unsigned short	ServerPort = 0;
 #ifdef __WINDOWS__
 	SOCKET		Listenfd = NULL;
 #else

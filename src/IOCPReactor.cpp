@@ -261,10 +261,10 @@ static inline void hsocket_set_keepalive(SOCKET fd) {  //这个函数使用有�
 	}
 }
 
-static inline void PostAcceptClient(BaseAccepter* accepter){
+static inline int PostAcceptClient(BaseAccepter* accepter){
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (!IocpSock){
-		return;
+		return -1;
 	}
 	IocpSock->event_type = ACCEPT;
 	IocpSock->user = NULL;
@@ -273,7 +273,7 @@ static inline void PostAcceptClient(BaseAccepter* accepter){
 	if (IocpSock->recv_buf == NULL){
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
 		ReleaseIOCP_Socket(IocpSock);
-		return;
+		return -2;
 	}
 	IocpSock->size = DATA_BUFSIZE;
 	IocpSock->databuf.buf = IocpSock->recv_buf;
@@ -282,7 +282,7 @@ static inline void PostAcceptClient(BaseAccepter* accepter){
 	IocpSock->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (IocpSock->fd == INVALID_SOCKET){
 		ReleaseIOCP_Socket(IocpSock);
-		return;
+		return -3;
 	}
 
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
@@ -294,24 +294,20 @@ static inline void PostAcceptClient(BaseAccepter* accepter){
 	if (false == rc){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
 			ReleaseIOCP_Socket(IocpSock);
-			return;
+			return -4;
 		}
 	}
-	return;
+	return 0;
 }
 
-static inline void delete_protocol(BaseProtocol* proto, BaseAccepter* accepter) {
-	if (proto->sockCount == 0) {
-		switch (proto->protoType) {
+static inline void delete_protocol(BaseProtocol* proto) {
+	if (proto->socket_count == 0) {
+		switch (proto->protocol_type) {
 		case CLIENT_PROTOCOL:
 			break;
 		case SERVER_PROTOCOL:
 			ThreadUnDistribution(proto);
-			accepter->ProtocolDelete(proto);
-			break;
-		case AUTO_PROTOCOL:
-			ThreadUnDistribution(proto);
-			delete proto;
+			proto->_free();
 			break;
 		default:
 			break;
@@ -320,13 +316,13 @@ static inline void delete_protocol(BaseProtocol* proto, BaseAccepter* accepter) 
 }
 
 static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
-	BaseAccepter* accpeter = NULL;
 	switch (sock_io_type){
-	case ACCEPT:
-		accpeter = (BaseAccepter*)(IocpSock->user_data);
-		PostAcceptClient(accpeter);
+	case ACCEPT: {
+		BaseAccepter* accepter = (BaseAccepter*)(IocpSock->user_data);
+		if (PostAcceptClient(accepter)) accepter->Listening = false;
 		ReleaseIOCP_Socket(IocpSock);
 		return;
+	}
 	case WRITE: {
 		HSENDBUFF IocpBuff = (HSENDBUFF)IocpSock;
 		if (IocpBuff->databuf.buf != NULL) free(IocpBuff->databuf.buf);
@@ -337,7 +333,7 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
 		if (!ret) {
 			BaseProtocol* old = IocpSock->user;
-			old->sockCount--;
+			old->socket_count--;
 			Unbind_Callback call = IocpSock->unbind_call;
 			if (call) {
 				call(IocpSock, old, IocpSock->rebind_user, IocpSock->call_data);
@@ -349,7 +345,7 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 				HANDLE CompletionPort = user->thread_stat->CompletionPort;
 				PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
 			}
-			delete_protocol(old, old->accepter);
+			delete_protocol(old);
 		}
 		return;
 	}
@@ -359,13 +355,12 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 
 	if (IocpSock->fd != INVALID_SOCKET){
 		BaseProtocol* proto = IocpSock->user;
-		accpeter = proto->accepter;
-		proto->sockCount--;
+		proto->socket_count--;
 		if (READ == IocpSock->event_type)
 			proto->ConnectionClosed(IocpSock, err);
 		else
 			proto->ConnectionFailed(IocpSock, err);
-		delete_protocol(proto, accpeter);
+		delete_protocol(proto);
 	}
 	ReleaseIOCP_Socket(IocpSock);
 }
@@ -430,18 +425,18 @@ static void PostRecv(HSOCKET IocpSock){
 }
 
 static void do_aceept(HSOCKET IocpSock){
-	BaseAccepter* accpeter = (BaseAccepter*)IocpSock->user_data;
+	BaseAccepter* accepter = (BaseAccepter*)IocpSock->user_data;
 	
 	//连接成功后刷新套接字属性
-	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accpeter->Listenfd), sizeof(accpeter->Listenfd));
+	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
 	//hsocket_set_keepalive(IocpSock->fd);
 
-	BaseProtocol* proto = accpeter->ProtocolCreate();
+	BaseProtocol* proto = accepter->ProtocolCreate();
 	if (proto) {
 		IocpSock->user = proto;
 		IocpSock->user_data = NULL;
 		IocpSock->event_type = ACCEPTED;
-		if (!proto->accepter) proto->AccepterSet(accpeter, SERVER_PROTOCOL);
+		if (!proto->protocol_type) proto->protocol_type = SERVER_PROTOCOL;
 		ThreadStat* ts = ThreadDistribution(proto);
 
 		int nSize = sizeof(IocpSock->peer_addr);
@@ -449,7 +444,7 @@ static void do_aceept(HSOCKET IocpSock){
 
 		CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
-		PostAcceptClient(accpeter);
+		if (PostAcceptClient(accepter)) accepter->Listening = false;
 	}
 	else {
 		do_close(IocpSock, IocpSock->event_type, -1);
@@ -723,7 +718,7 @@ static void do_connect(HSOCKET IocpSock) {
 
 static void do_accepted(HSOCKET IocpSock){
 	BaseProtocol* proto = IocpSock->user;
-	proto->sockCount++;
+	proto->socket_count++;
 	proto->ConnectionMade(IocpSock, IocpSock->conn_type);
 	PostRecv(IocpSock);
 }
@@ -732,7 +727,7 @@ static void do_rebind(HSOCKET IocpSock) {
 	BaseProtocol* proto = IocpSock->user;
 	HANDLE CompletionPort = proto->thread_stat->CompletionPort;
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, CompletionPort, (ULONG_PTR)IocpSock, 0);
-	proto->sockCount++;
+	proto->socket_count++;
 	Rebind_Callback callback = IocpSock->rebind_call;
 	callback(IocpSock, proto, IocpSock->call_data);
 	PostRecv(IocpSock);
@@ -937,27 +932,34 @@ int __STDCALL ReactorStart(){
 }
 
 int __STDCALL AccepterRun(BaseAccepter* accepter){
-	if (!accepter->Init()) return -1;
-
+	if (accepter->Listening || !accepter->Init()) return -1;
+	accepter->Listening = true;
 	if (accepter->ServerPort != 0){
 		accepter->Listenfd = get_listen_sock(accepter->ServerAddr, accepter->ServerPort);
-		if (accepter->Listenfd == SOCKET_ERROR) return -2;
-
+		if (accepter->Listenfd == SOCKET_ERROR) {
+			accepter->Listening = false;
+			return -2;
+		}
 		CreateIoCompletionPort((HANDLE)accepter->Listenfd, ListenCompletionPort, (ULONG_PTR)accepter->Listenfd, 0);
-		for (int i = 0; i < ActorThreadWorker; i++)
-			PostAcceptClient(accepter);
+		if (PostAcceptClient(accepter)) {
+			accepter->Listening = false;
+			closesocket(accepter->Listenfd);
+			return -3;
+		}
 	}
 	Accepters.insert(std::pair<uint16_t, BaseAccepter*>(accepter->ServerPort, accepter));
 	return 0;
 }
 
-int __STDCALL AccepterClose(BaseAccepter* accpeter){
-	std::map<uint16_t, BaseAccepter*>::iterator iter;
-	iter = Accepters.find(accpeter->ServerPort);
-	if (iter != Accepters.end()){
-		Accepters.erase(iter);
+int __STDCALL AccepterStop(BaseAccepter* accepter){
+	Accepters.erase(accepter->ServerPort);
+	if (accepter->Listenfd) {
+		closesocket(accepter->Listenfd);
+		accepter->Listenfd = NULL;
 	}
-	accpeter->Close();
+	else {
+		accepter->Listening = false;
+	}
 	return 0;
 }
 
@@ -1039,7 +1041,7 @@ static bool IOCPConnectUDP(BaseProtocol* proto, HSOCKET IocpSock, int listen_por
 }
 
 HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
-	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) return NULL;
+	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) return NULL;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL; 
 
@@ -1056,7 +1058,7 @@ HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}
-	proto->sockCount++;
+	proto->socket_count++;
 	return 0;
 }
 
@@ -1093,7 +1095,7 @@ static bool IOCPConnectTCP(BaseProtocol* proto, HSOCKET IocpSock){
 }
 
 HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE conntype){
-	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) return NULL;
+	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) return NULL;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL;
 
@@ -1120,7 +1122,7 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}
-	proto->sockCount++;
+	proto->socket_count++;
 	return IocpSock;
 }
 
@@ -1265,7 +1267,7 @@ void __STDCALL HsocketClosed(HSOCKET hsock) {
 	if (!hsock || hsock->fd == INVALID_SOCKET || hsock->fd == NULL) return;
 	closesocket(hsock->fd);
 	hsock->fd = INVALID_SOCKET;
-	hsock->user->sockCount--;
+	hsock->user->socket_count--;
 }
 
 int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)

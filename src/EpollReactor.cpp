@@ -154,6 +154,7 @@ static void release_hsock(HSOCKET hsock){
 	default:
 		break;
 	}
+	if (hsock->fd) close(hsock->fd);
 	if (hsock->recv_buf) free(hsock->recv_buf);
 	if (hsock->write_buf) free(hsock->write_buf);
 	free(hsock);
@@ -285,18 +286,14 @@ static void socket_set_keepalive(int fd){
 	setsockopt(fd, SOL_TCP, TCP_KEEPCNT, (void *)&keepcount, sizeof(keepcount));
 }
 
-static inline void delete_protocol(BaseProtocol* proto, BaseAccepter* accpeter) {
-	if (proto->sockCount == 0) {
-		switch (proto->protoType) {
+static inline void delete_protocol(BaseProtocol* proto) {
+	if (proto->socket_count == 0) {
+		switch (proto->protocol_type) {
 		case CLIENT_PROTOCOL:
 			break;
 		case SERVER_PROTOCOL:
 			ThreadUnDistribution(proto);
-			accpeter->ProtocolDelete(proto);
-			break;
-		case AUTO_PROTOCOL:
-			ThreadUnDistribution(proto);
-			delete proto;
+			proto->_free();
 			break;
 		default:
 			break;
@@ -305,10 +302,14 @@ static inline void delete_protocol(BaseProtocol* proto, BaseAccepter* accpeter) 
 }
 
 static void do_close(HSOCKET hsock){
-	if(hsock->_conn_stat == SOCKET_UNBIND){
+	if (hsock->_conn_stat == SOCKET_ACCEPTING){
+		BaseAccepter* accepter = (BaseAccepter*)hsock->user_data;
+		accepter->Listening = false;
+	}
+	else if(hsock->_conn_stat == SOCKET_UNBIND){
 		epoll_del_read(hsock->fd, hsock->epoll_fd);
 		BaseProtocol* old = hsock->user;
-		old->sockCount--;
+		old->socket_count--;
 		Unbind_Callback call = hsock->unbind_call;
 		if (call){
 			call(hsock, old, hsock->rebind_user, hsock->call_data);
@@ -320,7 +321,7 @@ static void do_close(HSOCKET hsock){
 			hsock->_conn_stat = SOCKET_REBIND;
 			epoll_add_connect(hsock);
 		}
-		delete_protocol(old, old->accepter);
+		delete_protocol(old);
 		return;
 	}
 	else if (hsock->_conn_stat < SOCKET_CLOSED){
@@ -328,15 +329,14 @@ static void do_close(HSOCKET hsock){
 		int error = 0;
 		socklen_t errlen = sizeof(error);
 		getsockopt(hsock->fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
-		proto->sockCount--;
+		proto->socket_count--;
 		if (hsock->_conn_stat == SOCKET_CONNECTING)
 			proto->ConnectionFailed(hsock, error);
 		else
     		proto->ConnectionClosed(hsock, error);
-		delete_protocol(proto, proto->accepter);
+		delete_protocol(proto);
 	}
     epoll_del_read(hsock->fd, hsock->epoll_fd);
-    close(hsock->fd);
     release_hsock(hsock);
 }
 
@@ -711,7 +711,7 @@ static int do_read(HSOCKET hsock){
 
 static int do_rebind(HSOCKET hsock){
 	BaseProtocol* proto = hsock->user;
-	proto->sockCount++;
+	proto->socket_count++;
 	hsock->_conn_stat = SOCKET_CONNECTED;
 	Rebind_Callback callback = hsock->rebind_call;
 	hsock->_flag = 1;
@@ -752,13 +752,13 @@ static void do_signal(HSIGNAL hsock){
 }
 
 static int do_accept(HSOCKET listenhsock){
-	BaseAccepter* accpeter = (BaseAccepter*)listenhsock->user_data;
+	BaseAccepter* accepter = (BaseAccepter*)listenhsock->user_data;
     struct sockaddr_in6 addr;
 	socklen_t len = sizeof(addr);
    	int fd = 0;
 
 	while (1){
-	    fd = accept(accpeter->Listenfd, (struct sockaddr *)&addr, &len);
+	    fd = accept(accepter->Listenfd, (struct sockaddr *)&addr, &len);
 		if (fd < 0) break;
         HSOCKET hsock = new_hsockt();
 		if (hsock == NULL) {
@@ -773,8 +773,8 @@ static int do_accept(HSOCKET listenhsock){
 		memcpy(&hsock->peer_addr, &addr, sizeof(addr));
 		socket_set_keepalive(fd);
 
-        BaseProtocol* proto = accpeter->ProtocolCreate();
-		if (!proto->accepter) proto->AccepterSet(accpeter, SERVER_PROTOCOL);
+        BaseProtocol* proto = accepter->ProtocolCreate();
+		if (!proto->protocol_type) proto->Set(SERVER_PROTOCOL);
 		ThreadStat* ts = ThreadDistribution(proto);
 
         hsock->fd = fd;
@@ -783,7 +783,7 @@ static int do_accept(HSOCKET listenhsock){
 		hsock->_conn_stat = SOCKET_CONNECTING;
 		set_linger_for_fd(fd);
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
-		proto->sockCount++;
+		proto->socket_count++;
 		epoll_add_connect(hsock);
 	}
 	return 1;
@@ -926,20 +926,23 @@ int ReactorStart(){
 }
 
 int	AccepterRun(BaseAccepter* accepter){
-	if (!accepter->Init())
-		return -1;
+	if (accepter->Listening || !accepter->Init())  return -1;
+	accepter->Listening = true;
 	if (accepter->ServerPort > 0){
 		accepter->Listenfd = get_listen_sock(accepter->ServerAddr, accepter->ServerPort);
 		if (accepter->Listenfd < 0){
 			printf("%s:%d %d\n", __func__, __LINE__, accepter->Listenfd);
+			accepter->Listening = false;
 			return -2;
 		}
 		HSOCKET hsock = new_hsockt();
 		if (hsock == NULL) {
 			close(accepter->Listenfd);
+			accepter->Listening = false;
 			return -3;
 		}
 		hsock->fd = accepter->Listenfd;
+		hsock->epoll_fd = epoll_listen_fd;
 		hsock->user_data = accepter;
 		hsock->_conn_stat = SOCKET_ACCEPTING;
 		epoll_add_accept(hsock);
@@ -948,13 +951,15 @@ int	AccepterRun(BaseAccepter* accepter){
 	return 0;
 }
 
-int AccepterClose(BaseAccepter* accpeter){
-	std::map<uint16_t, BaseAccepter*>::iterator iter;
-	iter = Accepters.find(accpeter->ServerPort);
-	if (iter != Accepters.end()){
-		Accepters.erase(iter);
+int AccepterStop(BaseAccepter* accepter){
+	Accepters.erase(accepter->ServerPort);
+	if (accepter->Listenfd > 0) {
+		close(accepter->Listenfd);
+		accepter->Listenfd = 0;
 	}
-	accpeter->Close();
+	else {
+		accepter->Listening = false;
+	}
 	return 0;
 }
 
@@ -963,7 +968,7 @@ static bool EpollConnectExUDP(BaseProtocol* proto, HSOCKET hsock, int listen_por
 	if(fd < 0) {
 		return false;
 	}
-	hsock->fd = fd;
+	
 	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin6_family = AF_INET6;
@@ -977,12 +982,13 @@ static bool EpollConnectExUDP(BaseProtocol* proto, HSOCKET hsock, int listen_por
 	}
 	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
 	hsock->_conn_stat = SOCKET_CONNECTED;
+	hsock->fd = fd;
 	epoll_add_read(hsock);
 	return true;
 }
 
 HSOCKET HsocketListenUDP(BaseProtocol* proto, int port){
-	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) 
+	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) 
 		return NULL;
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
@@ -1005,7 +1011,7 @@ HSOCKET HsocketListenUDP(BaseProtocol* proto, int port){
 		release_hsock(hsock);
 		return NULL;
 	}
-	proto->sockCount++;
+	proto->socket_count++;
 	return hsock;
 }
 
@@ -1027,7 +1033,7 @@ static bool EpollConnectExTCP(BaseProtocol* proto, HSOCKET hsock){
 }
 
 HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE type){
-	if (proto == NULL || (proto->sockCount == 0 && proto->protoType == SERVER_PROTOCOL)) 
+	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) 
 		return NULL;
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
@@ -1055,7 +1061,7 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 		release_hsock(hsock);
 		return NULL;
 	}
-	proto->sockCount++;
+	proto->socket_count++;
 	return hsock;
 }
 
@@ -1256,7 +1262,7 @@ void HsocketClose(HSOCKET hsock){
 
 void HsocketClosed(HSOCKET hsock){
 	if (hsock == NULL) return;
-	hsock->user->sockCount--;
+	hsock->user->socket_count--;
 	hsock->_conn_stat = SOCKET_CLOSED;
 	epoll_mod_write(hsock);
 	return;

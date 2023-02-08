@@ -79,9 +79,9 @@ enum CONN_TYPE:char {
 };
 
 enum PROTOCOL_TPYE:char {
-	CLIENT_PROTOCOL = 0,
-	SERVER_PROTOCOL = 1,
-	AUTO_PROTOCOL = 2
+	UNKNOWN_PROTOCOL = 0,
+	CLIENT_PROTOCOL,
+	SERVER_PROTOCOL
 };
 
 typedef struct {
@@ -242,7 +242,7 @@ extern "C"
 
 	Reactor_API int		__STDCALL	ReactorStart();
 	Reactor_API int		__STDCALL	AccepterRun(BaseAccepter* accepter);
-	Reactor_API int		__STDCALL	AccepterClose(BaseAccepter* accepter);
+	Reactor_API int		__STDCALL	AccepterStop(BaseAccepter* accepter);
 
 	Reactor_API HSOCKET __STDCALL	HsocketListenUDP(BaseProtocol* proto, int port);
 	Reactor_API HSOCKET	__STDCALL	HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE iotype);
@@ -286,17 +286,16 @@ extern "C"
 
 class BaseProtocol{
 public:
-	BaseAccepter*	accepter = NULL;
 	ThreadStat*		thread_stat = NULL;
-	PROTOCOL_TPYE	protoType = SERVER_PROTOCOL;
-	long			sockCount = 0;
+	PROTOCOL_TPYE	protocol_type = UNKNOWN_PROTOCOL;
+	long			socket_count = 0;
 
 public:
 	BaseProtocol() { 
-		this->protoType = SERVER_PROTOCOL;
 	};
 	virtual ~BaseProtocol() {};
-	void	AccepterSet(BaseAccepter* accepter, PROTOCOL_TPYE prototype) { this->accepter = accepter; this->protoType = prototype; }
+	virtual void _free() { delete this; };
+	void	Set(PROTOCOL_TPYE prototype) {this->protocol_type = prototype; }
 	void	ThreadSet() { ThreadDistribution(this); }
 	void	ThreadSet(int index) { ThreadDistributionIndex(this, index); }
 	void	ThreadUnset() { ThreadUnDistribution(this); }
@@ -317,30 +316,20 @@ public:
 		this->ServerPort = listenport;
 		return AccepterRun(this);
 	};
+	void Stop() { AccepterStop(this); };
 
 public:
 	char			ServerAddr[40] = { 0x0 };
 	unsigned short	ServerPort = 0;
+	bool			Listening = false;
 #ifdef __WINDOWS__
 	SOCKET		Listenfd = NULL;
 #else
 	int			Listenfd = 0;
 #endif // __WINDOWS__
 	virtual bool	Init() = 0;
-	virtual void	Close() = 0;
 	virtual void	TimeOut() = 0;
 	virtual BaseProtocol*	ProtocolCreate() = 0;
-	virtual void			ProtocolDelete(BaseProtocol* proto) = 0;
-};
-
-class AutoProtocol: public BaseProtocol{
-public:
-	AutoProtocol() {};
-	virtual ~AutoProtocol() {};
-	virtual void ConnectionMade(HSOCKET hsock, CONN_TYPE type) = 0;
-	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
-	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
-	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
 };
 
 #endif // !_REACTOR_H_

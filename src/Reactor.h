@@ -57,9 +57,9 @@
 #endif // __WINDOWS__
 
 #ifdef __WINDOWS__
-#define LONGLOCK(a)  while (InterlockedExchange(&a, 1)){Sleep(0);}
-#define LONGUNLOCK(a)	InterlockedExchange(&a, 0)
-#define LONGTRYLOCK(a)	!InterlockedExchange(&a, 1)
+#define LONGLOCK(a)  while (InterlockedExchange8(&a, 1)){Sleep(0);}
+#define LONGUNLOCK(a)	InterlockedExchange8(&a, 0)
+#define LONGTRYLOCK(a)	!InterlockedExchange8(&a, 1)
 #else
 #define LONGLOCK(a)	while (__sync_fetch_and_or(&a, 1)){sleep(0);}
 #define LONGUNLOCK(a)	__sync_fetch_and_and(&a, 0)
@@ -121,44 +121,43 @@ typedef struct Socket_Content {
 			WSABUF		databuf;
 		};
 		struct {
-			BaseProtocol* rebind_user;
+			BaseProtocol*	rebind_proto;
 			Unbind_Callback unbind_call;
 			Rebind_Callback rebind_call;
-			void* call_data;
+			void*			call_data;
 		};
 	};
-	char		event_type;	//投递类型accept, conect, read, write
+	char	event_type;	//投递类型accept, conect, read, write
 
-	CONN_TYPE	conn_type;
-	DWORD		flag;
-
-	char*		recv_buf;
-	int			offset;
-	int			size;
-
-	int						fromlen;
+	CONN_TYPE				conn_type;
 	struct sockaddr_in6		peer_addr;
-	BaseProtocol*			user;
-	void*					user_data;	
-	SOCKET					fd;
+
+	char*	recv_buf;
+	int		offset;
+	int		size;
+	
+	SOCKET			fd;
+	BaseProtocol*	proto;
+	void*			sock_data;
+	void*			user_data;
 }*HSOCKET;
 #define SOCKET_CTX_SIZE sizeof(Socket_Content)
 
 typedef struct Timer_Content {
 	CONN_TYPE		conn_type;
 	char			once;
-	BaseProtocol*	user;
+	char			close;
+	char			lock;
+	BaseProtocol*	proto;
 	Timer_Callback	call;
 	HANDLE			timer;
 	HANDLE			completion_port;
-	long			lock;
-	long			close;
 }*HTIMER;
 #define TIMER_CTX_SIZE sizeof(Timer_Content)
 
 typedef struct Event_Content {
 	CONN_TYPE		conn_type;
-	BaseProtocol*	user;
+	BaseProtocol*	proto;
 	Event_Callback	call;
 	void*			event_data;
 }*HEVENT;
@@ -166,7 +165,7 @@ typedef struct Event_Content {
 
 typedef struct Signal_Content {
 	CONN_TYPE			conn_type;
-	BaseProtocol*		user;
+	BaseProtocol*		proto;
 	Signal_Callback		call;
 	unsigned long long	signal;
 }*HSIGNAL;
@@ -175,58 +174,58 @@ typedef struct Signal_Content {
 #else
 
 typedef struct Socket_Content {
-	CONN_TYPE				conn_type;
-	unsigned char			_conn_stat:7;
-	unsigned char			_flag :1;
-	unsigned char			_send_lock;
-	struct sockaddr_in6		peer_addr;
+	CONN_TYPE			conn_type;
+	unsigned char		_conn_stat:7;
+	unsigned char		_flag :1;
+	unsigned char		_send_lock;
+	struct sockaddr_in6	peer_addr;
 	
-	BaseProtocol* 			rebind_user;
-	Unbind_Callback			unbind_call;
-	Rebind_Callback			rebind_call;
-	void*					call_data;
+	BaseProtocol*	rebind_proto;
+	Unbind_Callback	unbind_call;
+	Rebind_Callback	rebind_call;
+	void*			call_data;
 
-	BaseProtocol*			user;
-	void*					user_data;
+	char*	recv_buf;
+	int		recv_size;
+	int		offset;
 
-	int				fd;
-	int 			epoll_fd;
+	char*	write_buf;
+	int		write_size;
+	int		write_offset;
 
-	char*			recv_buf;
-	int				recv_size;
-	int				offset;
-
-	char*			write_buf;
-	int				write_size;
-	int				write_offset;
+	int	fd;
+	int	epoll_fd;
+	BaseProtocol*	proto;
+	void*			sock_data;
+	void*			user_data;
 }*HSOCKET;
 #define SOCKET_CTX_SIZE sizeof(Socket_Content)
 
 typedef struct Timer_Content{
-	CONN_TYPE	conn_type;
-	unsigned char _conn_stat;
-	char once;
-	int	fd;
-	int epoll_fd;
-	BaseProtocol* user;
-	Timer_Callback call;
+	CONN_TYPE		conn_type;
+	unsigned char	_conn_stat;
+	char			once;
+	int				fd;
+	int				epoll_fd;
+	BaseProtocol*	proto;
+	Timer_Callback	call;
 }TIMER_CTX, *HTIMER;
 
 typedef struct Event_Content{
-	CONN_TYPE	conn_type;
-	int			fd;
-	int 		epoll_fd;
-	BaseProtocol* user;
-	Event_Callback call;
-	void* 	event_data;
+	CONN_TYPE		conn_type;
+	int				fd;
+	int 			epoll_fd;
+	BaseProtocol*	proto;
+	Event_Callback	call;
+	void*			event_data;
 }EVEVT_CTX, *HEVENT;
 
 typedef struct Signal_Content{
-	CONN_TYPE	conn_type;
-	int			fd;
-	int 		epoll_fd;
-	BaseProtocol* user;
-	Signal_Callback call;
+	CONN_TYPE		conn_type;
+	int				fd;
+	int 			epoll_fd;
+	BaseProtocol*	proto;
+	Signal_Callback	call;
 	unsigned long long signal;
 }SIGNAL_CTX, *HSIGNAL;
 #endif // __WINDOWS__
@@ -253,18 +252,16 @@ extern "C"
 	Reactor_API int		__STDCALL	HsocketPopBuf(HSOCKET hsock, int len);
 
 	Reactor_API void	__STDCALL	HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port);
-	Reactor_API void	__STDCALL	HsocketPeerIP(HSOCKET hsock, char* ip, size_t ipsz);
-	Reactor_API int		__STDCALL	HsocketPeerPort(HSOCKET hsock);
-	Reactor_API void	__STDCALL	HsocketLocalIP(HSOCKET hsock, char* ip, size_t ipsz);
-	Reactor_API int		__STDCALL	HsocketLocalPort(HSOCKET hsock);
+	Reactor_API void	__STDCALL	HsocketPeerAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port);
+	Reactor_API void	__STDCALL	HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port);
 
 	Reactor_API	HTIMER	__STDCALL	TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback);
 	Reactor_API void 	__STDCALL	TimerDelete(HTIMER hsock);
 	Reactor_API void	__STDCALL	PostEvent(BaseProtocol* proto, Event_Callback callback, void* event_data);
 	Reactor_API void	__STDCALL	PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long long signal);
 
-	Reactor_API void	__STDCALL HsocketUnbindUser(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback ucall, Rebind_Callback rcall, void* call_data);
-	Reactor_API void	__STDCALL HsocketRebindUser(HSOCKET hsock, BaseProtocol* proto, Rebind_Callback call, void* call_data);
+	Reactor_API void	__STDCALL HsocketUnbindProtocol(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback ucall, Rebind_Callback rcall, void* call_data);
+	Reactor_API void	__STDCALL HsocketRebindProtocol(HSOCKET hsock, BaseProtocol* proto, Rebind_Callback call, void* call_data);
 	Reactor_API int		__STDCALL GetHostByName(const char* name, char* buf, size_t size);
 
 #ifdef OPENSSL_SUPPORT
@@ -293,7 +290,7 @@ public:
 public:
 	BaseProtocol() { 
 	};
-	virtual ~BaseProtocol() {};
+	virtual ~BaseProtocol() { ThreadUnDistribution(this); };
 	virtual void _free() { delete this; };
 	void	Set(PROTOCOL_TPYE prototype) {this->protocol_type = prototype; }
 	void	ThreadSet() { ThreadDistribution(this); }

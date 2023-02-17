@@ -106,7 +106,7 @@ int main(){
 	printf("正在监听%d端口……\n", listen_port);
 
 
-	printf("创建EchoClient,并连接127.0.0.1:1080\n");
+	printf("创建EchoClient,并连接127.0.0.1:8000\n");
 	EchoClient* client = new EchoClient();
 	HsocketConnect(client, "127.0.0.1", 8000, TCP_CONN);
 

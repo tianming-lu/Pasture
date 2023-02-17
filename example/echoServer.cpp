@@ -15,6 +15,7 @@
 //
 
 #include <iostream>
+#include <functional>
 #include "../src/Reactor.h"
 
 #ifdef __WINDOWS__
@@ -23,12 +24,39 @@
 #define TimeSleep(x) sleep(x)
 #endif // __WINDOWS__
 
-class EchoProtocol: public BaseProtocol		//继承BaseProtocol
+class EchoClient : public BaseProtocol		//继承BaseProtocol
+{
+	HSOCKET sock = NULL;
+	HTIMER timer = NULL;
+	void ConnectionMade(HSOCKET hsock, CONN_TYPE type) {
+		printf("client 连接成功\n");
+		sock = hsock;
+		/* 创建一个定时器，定时发送 hello world */
+		timer = TimerCreate(this, 5000, 3000, [](HTIMER timer, BaseProtocol* proto) {
+			EchoClient* client = (EchoClient*)proto;
+			HsocketSend(client->sock, "hello world", 11);
+			printf("cient 发送: [hello world]\n");
+		});
+	};
+	void ConnectionFailed(HSOCKET hsock, int err) {};
+	void ConnectionClosed(HSOCKET hsock, int err) {
+		TimerDelete(timer);
+		timer = NULL;
+		sock = NULL;
+	};
+	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
+		printf("client 接收: [%.*s]\n\n", len, data);
+		HsocketPopBuf(hsock, len);
+	};
+};
+
+class EchoServer: public BaseProtocol		//继承BaseProtocol
 {
 	void ConnectionMade(HSOCKET hsock, CONN_TYPE type) {};
 	void ConnectionFailed(HSOCKET hsock, int err) {};
 	void ConnectionClosed(HSOCKET hsock, int err) {};
 	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
+		printf("server 接收: [%.*s]\n", len, data);
 		HsocketSend(hsock, data, len); 
 		HsocketPopBuf(hsock, len);
 		//HsocketClose(hsock);   //从容关闭，等待关闭通知
@@ -45,8 +73,8 @@ public:
 	void	TimeOut() {
 	};
 	BaseProtocol* ProtocolCreate() {    //accept建立新连接时创建一个EchoProtocol对象
-		EchoProtocol* proto = new EchoProtocol;
-		//proto->Set(CLIENT_PROTOCOL);   默认为SERVER_PROTOCOL，连接关闭时proto会被自动释放，否则由用户控制释放时机
+		EchoServer* proto = new EchoServer;
+		//proto->AutoFree(false);   //连接关闭时proto不要被自动释放，由用户控制释放时机
 		//proto->ThreadSet();   //自动分配工作线程
 		//proto->ThreadSet(0);   //分配到指定工作线程， 0 ~ ActorThreadWorker - 1 
 		return proto;
@@ -65,6 +93,12 @@ int main(){
 	//accepter->Listen("0.0.0.0", listen_port);  //仅ipv4
 	accepter->Listen("::", listen_port);		//ipv4、ipv6双协议栈
 	printf("正在监听%d端口……\n", listen_port);
+
+
+	printf("创建EchoClient,并连接127.0.0.1:1080\n");
+	EchoClient* client = new EchoClient();
+	HsocketConnect(client, "127.0.0.1", 8000, TCP_CONN);
+
 	TimeSleep(10);
 	printf("accepter 优雅关闭\n");
 	accepter->Stop();

@@ -23,7 +23,6 @@
 #include <sys/eventfd.h>
 #include <sys/prctl.h>
 #include <netdb.h>
-#include <vector>
 #include <map>
 #ifdef OPENSSL_SUPPORT
 #include <openssl/ssl.h>
@@ -34,9 +33,9 @@
 #define DATA_BUFSIZE 4096
 
 int ActorThreadWorker = 0;
-int epoll_listen_fd = 0;
-std::vector<ThreadStat*> ThreadStats;
-std::map<uint16_t, BaseAccepter*> Accepters;
+static int epoll_listen_fd = 0;
+static ThreadStat* ThreadStats;
+static  std::map<uint16_t, BaseAccepter*> Accepters;
 
 enum SOCKET_STAT:char{
 	SOCKET_UNKNOWN = 0,
@@ -50,32 +49,41 @@ enum SOCKET_STAT:char{
 	SOCKET_REBIND
 };
 
+#define THREAD_STATES_AT(x) ThreadStats + x;
 ThreadStat* ThreadDistribution(BaseProtocol* proto) {
-	if (proto->thread_stat) return proto->thread_stat;
+	short thread_id = proto->thread_id;
+	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	ThreadStat* tsa, * tsb;
-	tsa = ThreadStats[0];
+	thread_id = 0;
+	tsa = THREAD_STATES_AT(0);
 	for (int i = 1; i < ActorThreadWorker; i++) {
-		tsb = ThreadStats[i];
-		tsa = tsa->ProtocolCount <= tsb->ProtocolCount ? tsa : tsb;
+		tsb = THREAD_STATES_AT(i);
+		tsb = THREAD_STATES_AT(i);
+		if (tsb->ProtocolCount < tsa->ProtocolCount) {
+			tsa = tsb;
+			thread_id = i;
+		}
 	}
 	__sync_add_and_fetch(&tsa->ProtocolCount, 1);
-	proto->thread_stat = tsa;
+	proto->thread_id = thread_id;
 	return tsa;
 }
 
 ThreadStat* ThreadDistributionIndex(BaseProtocol* proto, int index) {
-	if (proto->thread_stat) return proto->thread_stat;
-	ThreadStat* tsa = ThreadStats[index];
+	short thread_id = proto->thread_id;
+	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
+	ThreadStat* tsa = THREAD_STATES_AT(index);
 	__sync_add_and_fetch(&tsa->ProtocolCount, 1);
-	proto->thread_stat = tsa;
+	proto->thread_id = index;
 	return tsa;
 }
 
 void ThreadUnDistribution(BaseProtocol* proto) {
-	ThreadStat* ts = proto->thread_stat;
-	if (ts) {
+	short thread_id = proto->thread_id;
+	if (thread_id > -1) {
+		ThreadStat* ts = THREAD_STATES_AT(thread_id);
 		__sync_sub_and_fetch(&ts->ProtocolCount, 1);
-		proto->thread_stat = NULL;
+		proto->thread_id = -1;
 	}
 }
 
@@ -289,16 +297,8 @@ static void socket_set_keepalive(int fd){
 }
 
 static inline void delete_protocol(BaseProtocol* proto) {
-	if (proto->socket_count == 0) {
-		switch (proto->protocol_type) {
-		case CLIENT_PROTOCOL:
-			break;
-		case SERVER_PROTOCOL:
-			proto->_free();
-			break;
-		default:
-			break;
-		}
+	if (proto->socket_count == 0 && proto->auto_free) {
+		proto->_free();
 	}
 }
 
@@ -442,7 +442,7 @@ static int do_connect(HSOCKET hsock){
 }
 
 static int do_write_udp(HSOCKET hsock){
-	if (__sync_fetch_and_or(&hsock->_send_lock, 1)) return 0;
+	if (!ATOMIC_TRYLOCK(hsock->_send_lock)) return 0;
 	socklen_t socklen = sizeof(hsock->peer_addr);
 	int slen = 0;
 	char* data;
@@ -467,12 +467,12 @@ static int do_write_udp(HSOCKET hsock){
 	}
 	hsock->write_offset -= slen;
 	memmove(hsock->write_buf, hsock->write_buf + slen, hsock->write_offset);
-	__sync_fetch_and_and(&hsock->_send_lock, 0);
+	ATOMIC_UNLOCK(hsock->_send_lock);
 	return ret;
 }
 
 static int do_write_tcp(HSOCKET hsock){
-	if (__sync_fetch_and_or(&hsock->_send_lock, 1)) return 0;
+	if (!ATOMIC_TRYLOCK(hsock->_send_lock)) return 0;
 	char* data = hsock->write_buf;
 	int len = hsock->write_offset;
 	if (len > 0){
@@ -482,11 +482,11 @@ static int do_write_tcp(HSOCKET hsock){
 			memmove(data, data + n, hsock->write_offset);
 		}
 		else if(errno != EINTR && errno != EAGAIN) {
-			__sync_fetch_and_and(&hsock->_send_lock, 0);
+			ATOMIC_UNLOCK(hsock->_send_lock);
 			return -1;
 		}
 	}
-	__sync_fetch_and_and(&hsock->_send_lock, 0);
+	ATOMIC_UNLOCK(hsock->_send_lock);
 	return 0;
 }
 
@@ -497,7 +497,7 @@ static int do_write_ssl(HSOCKET hsock)
 	if (!SSL_is_init_finished(ssl_ctx->ssl)){
 		return do_write_tcp(hsock);
 	}
-	if (__sync_fetch_and_or(&hsock->_send_lock, 1)) return 0;
+	if (!ATOMIC_TRYLOCK(hsock->_send_lock)) return 0;
 	char* data = hsock->write_buf;
 	int len = hsock->write_offset > SSL_PACK_SIZE? SSL_PACK_SIZE : hsock->write_offset;
 	if (len > 0){
@@ -508,11 +508,11 @@ static int do_write_ssl(HSOCKET hsock)
 		}
 		else if(errno != EINTR && errno != EAGAIN){
 			printf("%s:%d write ssl error n:%d len:%d sslerr:%d errno:%d\n", __func__, __LINE__, n, len, SSL_get_error(ssl_ctx->ssl, n), errno);
-			__sync_fetch_and_and(&hsock->_send_lock, 0);
+			ATOMIC_UNLOCK(hsock->_send_lock);
 			return -1;
 		}
 	}
-	__sync_fetch_and_and(&hsock->_send_lock, 0);
+	ATOMIC_UNLOCK(hsock->_send_lock);
 	return 0;
 }
 #endif
@@ -780,7 +780,6 @@ static int do_accept(HSOCKET listenhsock){
 			close(fd);
 			release_hsock(hsock);
 		}
-		if (!proto->protocol_type) proto->Set(SERVER_PROTOCOL);
 		ThreadStat* ts = ThreadDistribution(proto);
 
         hsock->fd = fd;
@@ -897,9 +896,11 @@ static int runEpollServer(){
 		return -1;
 	}
 
+	ThreadStat* ts;
     for (i = 0; i < ActorThreadWorker; i++){
+		ts = THREAD_STATES_AT(i);
 		pthread_attr_init(&rattr);
-		if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, &(ThreadStats[i]->epoll_fd))) != 0){
+		if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, &ts->epoll_fd)) != 0){
 			return -1;
 		}
 	}
@@ -913,14 +914,14 @@ int ReactorStart(){
 		return -1;
 
 	ActorThreadWorker = get_nprocs_conf();
-	ThreadStats.reserve(ActorThreadWorker);
+
+	ThreadStats = (ThreadStat*)malloc(ActorThreadWorker * sizeof(ThreadStat));
+	if (!ThreadStats) return -2;
 	ThreadStat* ts;
 	for (int i = 0; i < ActorThreadWorker; i++) {
-		ts = (ThreadStat*)malloc(sizeof(ThreadStat));
-		if (!ts) return -2;
+		ts = THREAD_STATES_AT(i);
 		ts->epoll_fd = epoll_create(64);
 		ts->ProtocolCount = 0;
-		ThreadStats.push_back(ts);
 	}
 
 #ifdef OPENSSL_SUPPORT
@@ -994,7 +995,7 @@ static bool EpollConnectExUDP(BaseProtocol* proto, HSOCKET hsock, int listen_por
 }
 
 HSOCKET HsocketListenUDP(BaseProtocol* proto, int port){
-	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) 
+	if (proto == NULL) 
 		return NULL;
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
@@ -1040,7 +1041,7 @@ static bool EpollConnectExTCP(BaseProtocol* proto, HSOCKET hsock){
 }
 
 HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE type){
-	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) 
+	if (proto == NULL) 
 		return NULL;
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
@@ -1144,7 +1145,7 @@ void PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long lon
 }
 
 static void HsocketSendUdp(HSOCKET hsock, struct sockaddr* addr, int addrlen, const char* data, short len){
-	while (__sync_fetch_and_or(&hsock->_send_lock, 1)) usleep(0);
+	ATOMIC_LOCK(hsock->_send_lock);
 	int n = sendto(hsock->fd, data, len, MSG_DONTWAIT, addr, addrlen);
 	if (n <= 0){
 		int needlen = sizeof(short) + addrlen + len;
@@ -1153,7 +1154,7 @@ static void HsocketSendUdp(HSOCKET hsock, struct sockaddr* addr, int addrlen, co
         	char* newbuf = (char*)realloc(hsock->write_buf, newlen);
         	if (newbuf == NULL) {
 				printf("%s:%d memory realloc error\n", __func__, __LINE__);
-				__sync_fetch_and_and(&hsock->_send_lock, 0);
+				ATOMIC_UNLOCK(hsock->_send_lock);
 				return;
 			}
         	hsock->write_buf = newbuf;
@@ -1165,7 +1166,7 @@ static void HsocketSendUdp(HSOCKET hsock, struct sockaddr* addr, int addrlen, co
     	hsock->write_offset += needlen;
 		epoll_mod_write(hsock);
 	}
-	__sync_fetch_and_and(&hsock->_send_lock, 0);
+	ATOMIC_UNLOCK(hsock->_send_lock);
 }
 
 bool HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len){
@@ -1210,7 +1211,7 @@ static inline void HsocketSendCopy(HSOCKET hsock, int write_offset, const char* 
 #ifdef OPENSSL_SUPPORT
 static void HsocketSendSSL(HSOCKET hsock, const char* data, int len){
 	struct SSL_Content* ssl_ctx = (struct SSL_Content*)(hsock->sock_data);
-	while (__sync_fetch_and_or(&hsock->_send_lock, 1)) usleep(0);
+	ATOMIC_LOCK(hsock->_send_lock);
 	int write_offset = hsock->write_offset;
 	if (write_offset == 0){
 		int n = SSL_write(ssl_ctx->ssl, data, len > SSL_PACK_SIZE ? SSL_PACK_SIZE : len);
@@ -1220,12 +1221,12 @@ static void HsocketSendSSL(HSOCKET hsock, const char* data, int len){
 		}
 	}
 	HsocketSendCopy(hsock, write_offset, data, len);
-	__sync_fetch_and_and(&hsock->_send_lock, 0);
+	ATOMIC_UNLOCK(hsock->_send_lock);
 }
 #endif
 
 static void HsocketSendTcp(HSOCKET hsock, const char* data, int len){
-	while (__sync_fetch_and_or(&hsock->_send_lock, 1)) usleep(0);
+	ATOMIC_LOCK(hsock->_send_lock);
 	int write_offset = hsock->write_offset;
 	if (write_offset == 0){
 		int n = send(hsock->fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL);
@@ -1235,7 +1236,7 @@ static void HsocketSendTcp(HSOCKET hsock, const char* data, int len){
 		}
 	}
 	HsocketSendCopy(hsock, write_offset, data, len);
-	__sync_fetch_and_and(&hsock->_send_lock, 0);
+	ATOMIC_UNLOCK(hsock->_send_lock);
 }
 
 bool HsocketSend(HSOCKET hsock, const char* data, int len){

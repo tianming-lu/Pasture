@@ -57,13 +57,13 @@
 #endif // __WINDOWS__
 
 #ifdef __WINDOWS__
-#define LONGLOCK(a)  while (InterlockedExchange8(&a, 1)){Sleep(0);}
-#define LONGUNLOCK(a)	InterlockedExchange8(&a, 0)
-#define LONGTRYLOCK(a)	!InterlockedExchange8(&a, 1)
+#define ATOMIC_LOCK(a)  while (InterlockedExchange8(&a, 1)){Sleep(0);}
+#define ATOMIC_UNLOCK(a)	InterlockedExchange8(&a, 0)
+#define ATOMIC_TRYLOCK(a)	!InterlockedExchange8(&a, 1)
 #else
-#define LONGLOCK(a)	while (__sync_fetch_and_or(&a, 1)){sleep(0);}
-#define LONGUNLOCK(a)	__sync_fetch_and_and(&a, 0)
-#define LONGTRYLOCK(a)	!__sync_fetch_and_or(&a, 1)
+#define ATOMIC_LOCK(a)	while (__sync_fetch_and_or(&a, 1)){sleep(0);}
+#define ATOMIC_UNLOCK(a)	__sync_fetch_and_and(&a, 0)
+#define ATOMIC_TRYLOCK(a)	!__sync_fetch_and_or(&a, 1)
 #endif
 
 enum CONN_TYPE:char {
@@ -78,20 +78,16 @@ enum CONN_TYPE:char {
 	SIGNAL
 };
 
-enum PROTOCOL_TPYE:char {
-	UNKNOWN_PROTOCOL = 0,
-	CLIENT_PROTOCOL,
-	SERVER_PROTOCOL
-};
-
 typedef struct {
-	long	ProtocolCount;
 #ifdef __WINDOWS__
+	long	ProtocolCount;
 	HANDLE	CompletionPort;
 #else
-	int		epoll_fd;
+	int	ProtocolCount;
+	int	epoll_fd;
 #endif
 }ThreadStat;
+#define THREAD_STAT_SIZE sizeof(ThreadStat)
 
 extern int ActorThreadWorker;
 
@@ -283,16 +279,16 @@ extern "C"
 
 class BaseProtocol{
 public:
-	ThreadStat*		thread_stat = NULL;
-	PROTOCOL_TPYE	protocol_type = UNKNOWN_PROTOCOL;
-	long			socket_count = 0;
+	bool	auto_free = true;
+	short	thread_id = -1;
+	int		socket_count = 0;
 
 public:
 	BaseProtocol() { 
 	};
 	virtual ~BaseProtocol() { ThreadUnDistribution(this); };
 	virtual void _free() { delete this; };
-	void	Set(PROTOCOL_TPYE prototype) {this->protocol_type = prototype; }
+	void	AutoFree(bool flag) { auto_free = flag; }
 	void	ThreadSet() { ThreadDistribution(this); }
 	void	ThreadSet(int index) { ThreadDistributionIndex(this, index); }
 	void	ThreadUnset() { ThreadUnDistribution(this); }
@@ -303,6 +299,7 @@ public:
 	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
 	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
 };
+#define BASEPORTOCOL_SIZE sizeof(BaseProtocol)
 
 class BaseAccepter{
 public:
@@ -328,5 +325,6 @@ public:
 	virtual void	TimeOut() = 0;
 	virtual BaseProtocol*	ProtocolCreate() = 0;
 };
+#define BASEACCEPTER_SIZE sizeof(BaseAccepter)
 
 #endif // !_REACTOR_H_

@@ -15,7 +15,6 @@
 #include <Mstcpip.h>
 #include <time.h>
 #include <map>
-#include <vector>
 
 #pragma comment(lib, "Ws2_32.lib")
 #ifdef OPENSSL_SUPPORT
@@ -33,9 +32,9 @@
 #define REBIND 6
 
 int  ActorThreadWorker = 0;
-HANDLE ListenCompletionPort = NULL;
-std::vector<ThreadStat*> ThreadStats;
-std::map<uint16_t, BaseAccepter*> Accepters;
+static HANDLE ListenCompletionPort = NULL;
+static ThreadStat* ThreadStats;
+static std::map<uint16_t, BaseAccepter*> Accepters;
 
 static LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 static LPFN_CONNECTEX lpfnConnectEx = NULL;
@@ -69,32 +68,43 @@ static long ReplaceIoCompletionPort(SOCKET fd, HANDLE CompletionPort, PVOID Comp
 	return ret;
 }
 
+#define THREAD_STATES_AT(x) ThreadStats + x;
 ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto) {
-	if (proto->thread_stat) return proto->thread_stat;
+	short thread_id = proto->thread_id;
+	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	ThreadStat* tsa, * tsb;
-	tsa = ThreadStats[0];
+	thread_id = 0;
+	tsa = THREAD_STATES_AT(0);
 	for (int i = 1; i < ActorThreadWorker; i++) {
-		tsb = ThreadStats[i];
-		tsa = tsa->ProtocolCount <= tsb->ProtocolCount ? tsa : tsb;
+		tsb = THREAD_STATES_AT(i);
+		if (tsb->ProtocolCount < tsa->ProtocolCount) {
+			tsa = tsb;
+			thread_id = i;
+		}
 	}
 	InterlockedIncrement(&tsa->ProtocolCount);
-	proto->thread_stat = tsa;
+	proto->thread_id = thread_id;
 	return tsa;
 }
 
 ThreadStat* __STDCALL ThreadDistributionIndex(BaseProtocol* proto, int index) {
-	if (proto->thread_stat) return proto->thread_stat;
-	ThreadStat* tsa = ThreadStats[index];
-	InterlockedIncrement(&tsa->ProtocolCount);
-	proto->thread_stat = tsa;
-	return tsa;
+	short thread_id = proto->thread_id;
+	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
+	if (index > -1 && index < ActorThreadWorker) {
+		ThreadStat* ts = THREAD_STATES_AT(index);
+		InterlockedIncrement(&ts->ProtocolCount);
+		proto->thread_id = index;
+		return ts;
+	}
+	return NULL;
 }
 
 void __STDCALL ThreadUnDistribution(BaseProtocol* proto) {
-	ThreadStat* ts = proto->thread_stat;
-	if (ts) {
+	short thread_id = proto->thread_id;
+	if (thread_id > -1) {
+		ThreadStat* ts = THREAD_STATES_AT(thread_id);
 		InterlockedDecrement(&ts->ProtocolCount);
-		proto->thread_stat = NULL;
+		proto->thread_id = -1;
 	}
 }
 
@@ -305,16 +315,8 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 }
 
 static inline void delete_protocol(BaseProtocol* proto) {
-	if (proto->socket_count == 0) {
-		switch (proto->protocol_type) {
-		case CLIENT_PROTOCOL:
-			break;
-		case SERVER_PROTOCOL:
-			proto->_free();
-			break;
-		default:
-			break;
-		}
+	if (proto->socket_count == 0 && proto->auto_free) {
+		proto->_free();
 	}
 }
 
@@ -438,7 +440,6 @@ static void do_aceept(HSOCKET IocpSock){
 		IocpSock->proto = proto;
 		IocpSock->sock_data = NULL;
 		IocpSock->event_type = ACCEPTED;
-		if (!proto->protocol_type) proto->protocol_type = SERVER_PROTOCOL;
 		ThreadStat* ts = ThreadDistribution(proto);
 
 		int nSize = sizeof(IocpSock->peer_addr);
@@ -751,7 +752,7 @@ static void do_timer(HTIMER hsock) {
 	if (!hsock->close) {
 		Timer_Callback callback = (Timer_Callback)hsock->call;
 		callback(hsock, hsock->proto);
-		LONGUNLOCK(hsock->lock);
+		ATOMIC_UNLOCK(hsock->lock);
 		if (!hsock->close && hsock->once == 0) 
 			return;
 	}	
@@ -832,7 +833,7 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 }
 
 static void timer_queue_callback(HTIMER hsock, BOOLEAN TimerOrWaitFired) {
-	if (LONGTRYLOCK(hsock->lock)) {
+	if (ATOMIC_TRYLOCK(hsock->lock)) {
 		PostQueuedCompletionStatus(hsock->completion_port, 0, (ULONG_PTR)hsock, NULL);
 	}
 }
@@ -867,9 +868,10 @@ static int runIOCPServer(){
 	}
 	CloseHandle(ThreadHandle);
 
+	ThreadStat* ts;
 	for (int i = 0; i < ActorThreadWorker; i++){
-	//for (unsigned int i = 0; i < 1; i++){
-		ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ThreadStats[i]->CompletionPort, 0, NULL);
+		ts = THREAD_STATES_AT(i);
+		ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ts->CompletionPort, 0, NULL);
 		if (NULL == ThreadHandle) {
 			return -4;
 		}
@@ -886,22 +888,19 @@ int __STDCALL ReactorStart(){
 	}
 
 	ListenCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+	if (!ListenCompletionPort) return -1;
 
 	SYSTEM_INFO sysInfor;
 	GetSystemInfo(&sysInfor);
 	ActorThreadWorker = sysInfor.dwNumberOfProcessors;
 
-	ThreadStats.reserve(ActorThreadWorker);
+	ThreadStats = (ThreadStat*)malloc(ActorThreadWorker * sizeof(ThreadStat));
+	if (!ThreadStats) return -2;
 	ThreadStat* ts;
 	for (int i = 0; i < ActorThreadWorker; i++) {
-		ts = (ThreadStat*)malloc(sizeof(ThreadStat));
-		if (!ts) {
-			printf("%s:%d memory malloc error\n", __func__, __LINE__);
-			return -2;
-		}
+		ts = THREAD_STATES_AT(i);
 		ts->CompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
 		ts->ProtocolCount = 0;
-		ThreadStats.push_back(ts);
 	}
 
 	HMODULE ntmodule = GetModuleHandleA("ntdll.dll");
@@ -1045,7 +1044,7 @@ static bool IOCPConnectUDP(BaseProtocol* proto, HSOCKET IocpSock, int listen_por
 }
 
 HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
-	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) return NULL;
+	if (proto == NULL) return NULL;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL; 
 
@@ -1098,7 +1097,7 @@ static bool IOCPConnectTCP(BaseProtocol* proto, HSOCKET IocpSock){
 }
 
 HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE conntype){
-	if (proto == NULL || (proto->socket_count == 0 && proto->protocol_type == SERVER_PROTOCOL)) return NULL;
+	if (proto == NULL) return NULL;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL;
 
@@ -1179,14 +1178,14 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 #ifdef OPENSSL_SUPPORT
 static bool HsocketSendSSL(HSOCKET hsock, const char* data, int len) {
 	struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->sock_data;
-	LONGLOCK(ssl_ctx->wlock);
+	ATOMIC_LOCK(ssl_ctx->wlock);
 	int ret = SSL_write(ssl_ctx->ssl, data, len);
 	if (ret > 0) {
 		ssl_do_write(ssl_ctx, hsock);
-		LONGUNLOCK(ssl_ctx->wlock);
+		ATOMIC_UNLOCK(ssl_ctx->wlock);
 		return true;
 	}
-	LONGUNLOCK(ssl_ctx->wlock);
+	ATOMIC_UNLOCK(ssl_ctx->wlock);
 	printf("%s:%d ret:%d ssl_errono:%d len:%d\n", __func__, __LINE__, ret, SSL_get_error(ssl_ctx->ssl, ret), len);
 	return false;
 }

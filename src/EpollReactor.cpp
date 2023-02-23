@@ -297,7 +297,7 @@ static void socket_set_keepalive(int fd){
 }
 
 static inline void delete_protocol(BaseProtocol* proto) {
-	if (proto->socket_count == 0 && proto->auto_free) {
+	if (proto->socket_count == 0 && proto->auto_free_flag) {
 		proto->_free();
 	}
 }
@@ -726,7 +726,7 @@ static void do_timer(HTIMER hsock){
 	uint64_t value;
 	if (hsock->_conn_stat < SOCKET_CLOSED){
 		Timer_Callback call = hsock->call;
-		call(hsock, hsock->proto);
+		call(hsock, hsock->proto, hsock->user_data);
 		if (hsock->_conn_stat < SOCKET_CLOSED && hsock->once == 0){
 			read(hsock->fd, &value, sizeof(uint64_t)); //必须读取，否则定时器异常
 			return;
@@ -851,7 +851,7 @@ static void read_work_thread(int* efd){
 	}
 }
 
-static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto) {
+static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto, void* user_data) {
 	std::map<uint16_t, BaseAccepter*>::iterator iter;
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
@@ -874,6 +874,7 @@ static void accepters_timer_run(){
 	hsock->epoll_fd = epoll_listen_fd;
 	hsock->_conn_stat = 0;
 	hsock->once = 0;
+	hsock->user_data = NULL;
 
     struct itimerspec time_intv; //用来存储时间
     time_intv.it_value.tv_sec = 0;
@@ -966,6 +967,9 @@ int AccepterStop(BaseAccepter* accepter){
 	}
 	else {
 		accepter->Listening = false;
+	}
+	while (accepter->Listening) {
+		sleep(0);
 	}
 	return 0;
 }
@@ -1074,7 +1078,7 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 	return hsock;
 }
 
-HTIMER TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback){
+HTIMER TimerCreate(BaseProtocol* proto, void* user_data, int duetime, int looptime, Timer_Callback callback){
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock == NULL) 
 		return NULL;
@@ -1091,12 +1095,13 @@ HTIMER TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callbac
 	hsock->epoll_fd = ts ? ts->epoll_fd : epoll_listen_fd;
 	hsock->_conn_stat = 0;
 	hsock->once = looptime == 0 ? 1 : 0;
+	hsock->user_data = user_data;
 
 	duetime = duetime == 0? 1 : duetime;
-    struct itimerspec time_intv; //用来存储时间
-    time_intv.it_value.tv_sec = duetime/1000; //设定2s超时
+    struct itimerspec time_intv;
+    time_intv.it_value.tv_sec = duetime/1000;
     time_intv.it_value.tv_nsec = (duetime%1000)*1000000;
-    time_intv.it_interval.tv_sec = looptime/1000;   //每隔2s超时
+    time_intv.it_interval.tv_sec = looptime/1000;
     time_intv.it_interval.tv_nsec = (looptime%1000)*1000000;
 
     timerfd_settime(tfd, 0, &time_intv, NULL);  //启动定时器
@@ -1108,7 +1113,7 @@ void TimerDelete(HTIMER hsock){
 	hsock->_conn_stat = SOCKET_CLOSED;
 }
 
-void PostEvent(BaseProtocol* proto, Event_Callback callback, void* event_data){
+void PostEvent(BaseProtocol* proto, void* event_data, Event_Callback callback){
 	HEVENT hsock = (HEVENT)malloc(sizeof(Event_Content));
 	if (hsock == NULL) return;
 	int efd = eventfd(1, 0);
@@ -1126,7 +1131,7 @@ void PostEvent(BaseProtocol* proto, Event_Callback callback, void* event_data){
 	epoll_add_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
 }
 
-void PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long long signal){
+void PostSignal(BaseProtocol* proto, long long signal, Signal_Callback callback){
 	HSIGNAL hsock = (HSIGNAL)malloc(sizeof(Signal_Content));
 	if (hsock == NULL) return;
 	int efd = eventfd(1, 0);

@@ -315,7 +315,7 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 }
 
 static inline void delete_protocol(BaseProtocol* proto) {
-	if (proto->socket_count == 0 && proto->auto_free) {
+	if (proto->socket_count == 0 && proto->auto_free_flag) {
 		proto->_free();
 	}
 }
@@ -751,7 +751,7 @@ static void do_event(HEVENT hsock) {
 static void do_timer(HTIMER hsock) {
 	if (!hsock->close) {
 		Timer_Callback callback = (Timer_Callback)hsock->call;
-		callback(hsock, hsock->proto);
+		callback(hsock, hsock->proto, hsock->user_data);
 		ATOMIC_UNLOCK(hsock->lock);
 		if (!hsock->close && hsock->once == 0) 
 			return;
@@ -838,7 +838,7 @@ static void timer_queue_callback(HTIMER hsock, BOOLEAN TimerOrWaitFired) {
 	}
 }
 
-static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto) {
+static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto, void* user_data) {
 	std::map<uint16_t, BaseAccepter*>::iterator iter;
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
@@ -966,10 +966,13 @@ int __STDCALL AccepterStop(BaseAccepter* accepter){
 	else {
 		accepter->Listening = false;
 	}
+	while (accepter->Listening){
+		Sleep(0);
+	}
 	return 0;
 }
 
-HTIMER	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Timer_Callback callback) {
+HTIMER	__STDCALL TimerCreate(BaseProtocol* proto, void* user_data, int duetime, int looptime, Timer_Callback callback) {
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock) {
 		hsock->conn_type = TIMER;
@@ -980,6 +983,7 @@ HTIMER	__STDCALL TimerCreate(BaseProtocol* proto, int duetime, int looptime, Tim
 		hsock->completion_port = ts ? ts->CompletionPort : ListenCompletionPort;
 		hsock->close = 0;
 		hsock->lock = 0;
+		hsock->user_data = user_data;
 		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, duetime, looptime, 0);
 	}
 	return hsock;
@@ -989,7 +993,7 @@ void __STDCALL TimerDelete(HTIMER hsock) {
 	hsock->close = 1;
 }
 
-void __STDCALL PostEvent(BaseProtocol* proto, Event_Callback callback, void* event_data) {
+void __STDCALL PostEvent(BaseProtocol* proto, void* event_data, Event_Callback callback) {
 	HEVENT hsock = (HEVENT)malloc(sizeof(Event_Content));
 	if (hsock) {
 		hsock->conn_type = EVENT;
@@ -1001,7 +1005,7 @@ void __STDCALL PostEvent(BaseProtocol* proto, Event_Callback callback, void* eve
 	}
 }
 
-void __STDCALL PostSignal(BaseProtocol* proto, Signal_Callback callback, unsigned long long signal) {
+void __STDCALL PostSignal(BaseProtocol* proto, long long signal, Signal_Callback callback) {
 	HSIGNAL hsock = (HSIGNAL)malloc(sizeof(Signal_Content));
 	if (hsock) {
 		hsock->conn_type = SIGNAL;

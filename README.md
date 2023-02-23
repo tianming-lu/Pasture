@@ -22,6 +22,19 @@ echoServer.cpp    回显服务
 
 #### 示例
 ```C++
+/*	
+*	Copyright(c) 2019 lutianming email：641471957@qq.com
+*	Pasture is licensed under the Mulan PSL v1.
+*	You can use this software according to the terms and conditions of the Mulan PSL v1.
+*	You may obtain a copy of Mulan PSL v1 at :
+*	http://license.coscl.org.cn/MulanPSL
+*	THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR
+*	IMPLIED, INCLUDING BUT NOT LIMITED TO NON - INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR
+*	PURPOSE.
+*
+*	See the Mulan PSL v1 for more details.
+*/
+
 // 这是一个回显服务的示例代码
 //
 
@@ -43,7 +56,7 @@ class EchoClient : public BaseProtocol		//继承BaseProtocol
 		printf("client 连接成功\n");
 		sock = hsock;
 		/* 创建一个定时器，定时发送 hello world */
-		timer = TimerCreate(this, 5000, 3000, [](HTIMER timer, BaseProtocol* proto) {
+		timer = TimerCreate(this, NULL, 5000, 3000, [](HTIMER timer, BaseProtocol* proto, void* data) {
 			EchoClient* client = (EchoClient*)proto;
 			HsocketSend(client->sock, "hello world", 11);
 			printf("cient 发送: [hello world]\n");
@@ -85,9 +98,9 @@ public:
 	};
 	BaseProtocol* ProtocolCreate() {    //accept建立新连接时创建一个EchoProtocol对象
 		EchoServer* proto = new EchoServer;
-		//proto->AutoFree(false);   //连接关闭时proto不要被自动释放，由用户控制释放时机
-		//proto->ThreadSet();   //自动分配工作线程
-		//proto->ThreadSet(0);   //分配到指定工作线程， 0 ~ ActorThreadWorker - 1 
+		//proto->auto_free(false);   //连接关闭时proto不要被自动释放，由用户控制释放时机
+		//proto->thread_set();   //自动分配工作线程
+		//proto->thread_set(0);   //分配到指定工作线程， 0 ~ ActorThreadWorker - 1 
 		return proto;
 	};
 };
@@ -101,8 +114,8 @@ int main(){
 	EchoAccepter* accepter = new EchoAccepter();
 
 	printf("accepter 启动\n");
-	//accepter->Listen("0.0.0.0", listen_port);  //仅ipv4
-	accepter->Listen("::", listen_port);		//ipv4、ipv6双协议栈
+	//accepter->listen("0.0.0.0", listen_port);  //仅ipv4
+	accepter->listen("::", listen_port);		//ipv4、ipv6双协议栈
 	printf("正在监听%d端口……\n", listen_port);
 
 
@@ -112,28 +125,21 @@ int main(){
 
 	TimeSleep(10);
 	printf("accepter 优雅关闭\n");
-	accepter->Stop();
-
-	//安全起见，等待accpeter完全停止
-	while (true){
-		if (accepter->Listening == false) {
-			printf("accepter 已关闭\n");
-			break;
-		}
-	}
+	accepter->stop();
 
 	printf("accepter 重启\n");
 	listen_port = 8001;
-	accepter->Listen("::", listen_port);
+	accepter->listen("::", listen_port);
 	printf("正在监听%d端口……\n", listen_port);
 	//TimeSleep(30);
 	//printf("accepter 关闭\n");
-	//accepter->Stop();
+	//accepter->stop();
 
 	while (true){
 		TimeSleep(10);
 	}
 }
+
 ```
 
 

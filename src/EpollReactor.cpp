@@ -33,6 +33,13 @@
 #define DATA_BUFSIZE 4096
 
 int ActorThreadWorker = 0;
+
+typedef struct Thread_Content {
+	int	WorkerCount;
+	int	epoll_fd;
+}ThreadStat;
+#define THREAD_STAT_SIZE sizeof(ThreadStat)
+
 static int epoll_listen_fd = 0;
 static ThreadStat* ThreadStats;
 static  std::map<uint16_t, BaseAccepter*> Accepters;
@@ -50,8 +57,8 @@ enum SOCKET_STAT:char{
 };
 
 #define THREAD_STATES_AT(x) ThreadStats + x;
-ThreadStat* ThreadDistribution(BaseProtocol* proto) {
-	short thread_id = proto->thread_id;
+ThreadStat* ThreadDistribution(BaseWorker* worker) {
+	short thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
@@ -59,31 +66,31 @@ ThreadStat* ThreadDistribution(BaseProtocol* proto) {
 	for (int i = 1; i < ActorThreadWorker; i++) {
 		tsb = THREAD_STATES_AT(i);
 		tsb = THREAD_STATES_AT(i);
-		if (tsb->ProtocolCount < tsa->ProtocolCount) {
+		if (tsb->WorkerCount < tsa->WorkerCount) {
 			tsa = tsb;
 			thread_id = i;
 		}
 	}
-	__sync_add_and_fetch(&tsa->ProtocolCount, 1);
-	proto->thread_id = thread_id;
+	__sync_add_and_fetch(&tsa->WorkerCount, 1);
+	worker->thread_id = thread_id;
 	return tsa;
 }
 
-ThreadStat* ThreadDistributionIndex(BaseProtocol* proto, int index) {
-	short thread_id = proto->thread_id;
+ThreadStat* ThreadDistributionIndex(BaseWorker* worker, int index) {
+	short thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	ThreadStat* tsa = THREAD_STATES_AT(index);
-	__sync_add_and_fetch(&tsa->ProtocolCount, 1);
-	proto->thread_id = index;
+	__sync_add_and_fetch(&tsa->WorkerCount, 1);
+	worker->thread_id = index;
 	return tsa;
 }
 
-void ThreadUnDistribution(BaseProtocol* proto) {
-	short thread_id = proto->thread_id;
+void ThreadUnDistribution(BaseWorker* worker) {
+	short thread_id = worker->thread_id;
 	if (thread_id > -1) {
 		ThreadStat* ts = THREAD_STATES_AT(thread_id);
-		__sync_sub_and_fetch(&ts->ProtocolCount, 1);
-		proto->thread_id = -1;
+		__sync_sub_and_fetch(&ts->WorkerCount, 1);
+		worker->thread_id = -1;
 	}
 }
 
@@ -134,15 +141,10 @@ static HSOCKET new_hsockt(){
 }
 
 static void release_hsock(HSOCKET hsock){
-	switch (hsock->conn_type)
-	{
-	case TIMER:
-	case EVENT:
-	case SIGNAL:
-		free(hsock);
-		return;
+#if defined OPENSSL_SUPPORT || defined KCP_SUPPORT
+	switch (hsock->protocol){
 #ifdef OPENSSL_SUPPORT
-	case SSL_CONN:{
+	case SSL_PROTOCOL:{
 		struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->sock_data;
 		if (ssl_ctx){
 			if (ssl_ctx->ssl) {SSL_shutdown(ssl_ctx->ssl); SSL_free(ssl_ctx->ssl);}
@@ -153,7 +155,7 @@ static void release_hsock(HSOCKET hsock){
 	}
 #endif
 #ifdef KCP_SUPPORT
-	case KCP_CONN:{
+	case KCP_PROTOCOL:{
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcp_release(ctx->kcp);
 		free(ctx->buf);
@@ -164,6 +166,7 @@ static void release_hsock(HSOCKET hsock){
 	default:
 		break;
 	}
+#endif
 	if (hsock->fd) close(hsock->fd);
 	if (hsock->recv_buf) free(hsock->recv_buf);
 	if (hsock->write_buf) free(hsock->write_buf);
@@ -296,9 +299,9 @@ static void socket_set_keepalive(int fd){
 	setsockopt(fd, SOL_TCP, TCP_KEEPCNT, (void *)&keepcount, sizeof(keepcount));
 }
 
-static inline void delete_protocol(BaseProtocol* proto) {
-	if (proto->socket_count == 0 && proto->auto_free_flag) {
-		proto->_free();
+static inline void delete_worker(BaseWorker* worker) {
+	if (worker->socket_count == 0 && worker->auto_free_flag) {
+		worker->_free();
 	}
 }
 
@@ -309,34 +312,34 @@ static void do_close(HSOCKET hsock){
 	}
 	else if(hsock->_conn_stat == SOCKET_UNBIND){
 		epoll_del_read(hsock->fd, hsock->epoll_fd);
-		BaseProtocol* old = hsock->proto;
+		BaseWorker* old = hsock->worker;
 		old->socket_count--;
 		Unbind_Callback call = hsock->unbind_call;
 		if (call){
-			call(hsock, old, hsock->rebind_proto, hsock->call_data);
+			call(hsock, old, hsock->rebind_worker, hsock->call_data);
 		}
 		else{
-			BaseProtocol* proto = hsock->rebind_proto;
-			hsock->proto = proto;
-			ThreadStat* ts = ThreadDistribution(proto);
+			BaseWorker* worker = hsock->rebind_worker;
+			hsock->worker = worker;
+			ThreadStat* ts = ThreadDistribution(worker);
 			hsock->epoll_fd = ts->epoll_fd;
 			hsock->_conn_stat = SOCKET_REBIND;
 			epoll_add_connect(hsock);
 		}
-		delete_protocol(old);
+		delete_worker(old);
 		return;
 	}
 	else if (hsock->_conn_stat < SOCKET_CLOSED){
-		BaseProtocol* proto = hsock->proto;
+		BaseWorker* worker = hsock->worker;
 		int error = 0;
 		socklen_t errlen = sizeof(error);
 		getsockopt(hsock->fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
-		proto->socket_count--;
+		worker->socket_count--;
 		if (hsock->_conn_stat == SOCKET_CONNECTING)
-			proto->ConnectionFailed(hsock, error);
+			worker->ConnectionFailed(hsock, error);
 		else
-    		proto->ConnectionClosed(hsock, error);
-		delete_protocol(proto);
+    		worker->ConnectionClosed(hsock, error);
+		delete_worker(worker);
 	}
     epoll_del_read(hsock->fd, hsock->epoll_fd);
     release_hsock(hsock);
@@ -390,7 +393,7 @@ static bool do_ssl_init(HSOCKET hsock, int openssl_type, int verify, const char*
 	SSL_set_fd(ssl_ctx->ssl, hsock->fd);
 	openssl_type == SSL_CLIENT? SSL_set_connect_state(ssl_ctx->ssl): SSL_set_accept_state(ssl_ctx->ssl);
 	hsock->sock_data = ssl_ctx;
-	hsock->conn_type = SSL_CONN;
+	hsock->protocol = SSL_PROTOCOL;
 	
 	if (openssl_type == SSL_CLIENT){
 		SSL_do_handshake(ssl_ctx->ssl);
@@ -402,10 +405,10 @@ static int do_ssl_handshak(HSOCKET hsock, struct SSL_Content* ssl_ctx){
 	int ret = SSL_do_handshake(ssl_ctx->ssl);
 	if (ret == 1){
 		if (hsock->_conn_stat < SOCKET_CLOSED){
-			BaseProtocol* proto = hsock->proto;
+			BaseWorker* worker = hsock->worker;
 			hsock->_conn_stat = SOCKET_CONNECTED;
 			hsock->_flag = 1;
-			proto->ConnectionMade(hsock, hsock->conn_type);
+			worker->ConnectionMade(hsock, hsock->protocol);
 			hsock->_flag = 0;
 		}
 		return 0;
@@ -424,17 +427,17 @@ static int do_ssl_handshak(HSOCKET hsock, struct SSL_Content* ssl_ctx){
 
 static int do_connect(HSOCKET hsock){
 #ifdef OPENSSL_SUPPORT
-	if (hsock->conn_type == SSL_CONN){
+	if (hsock->protocol == SSL_PROTOCOL){
 		if (do_ssl_init(hsock, SSL_CLIENT, 0, NULL, NULL, NULL))
 			return 0;
 		return -1;
 	}
 #endif
 	if (hsock->_conn_stat < SOCKET_CLOSED){
-		BaseProtocol* proto = hsock->proto;
+		BaseWorker* worker = hsock->worker;
 		hsock->_conn_stat = SOCKET_CONNECTED;
 		hsock->_flag = 1;
-		proto->ConnectionMade(hsock, hsock->conn_type);
+		worker->ConnectionMade(hsock, hsock->protocol);
 		hsock->_flag = 0;
 		return 0;
 	}
@@ -519,10 +522,10 @@ static int do_write_ssl(HSOCKET hsock)
 
 static int do_write(HSOCKET hsock)
 {
-	if (hsock->conn_type == TCP_CONN)
+	if (hsock->protocol == TCP_PROTOCOL)
 		return do_write_tcp(hsock);
 #ifdef OPENSSL_SUPPORT
-	else if (hsock->conn_type == SSL_CONN)
+	else if (hsock->protocol == SSL_PROTOCOL)
 		return do_write_ssl(hsock);
 #endif
 	else
@@ -606,7 +609,7 @@ static int do_read_kcp(HSOCKET hsock){
 	ikcp_input(ctx->kcp, hsock->recv_buf, hsock->offset);
 	hsock->offset = 0;
 
-	BaseProtocol* proto = hsock->proto;
+	BaseWorker* worker = hsock->worker;
 	char* buf;
 	int rlen, size;
 	while (1) {
@@ -629,7 +632,7 @@ static int do_read_kcp(HSOCKET hsock){
 
 		if (hsock->_conn_stat < SOCKET_CLOSED){
 			hsock->_flag = 1;
-			proto->ConnectionRecved(hsock, ctx->buf, ctx->offset);
+			worker->ConnectionRecved(hsock, ctx->buf, ctx->offset);
 			hsock->_flag = 0;
 		}
 	}
@@ -640,7 +643,7 @@ static int do_read_kcp(HSOCKET hsock){
 static int do_read_udp(HSOCKET hsock){
 	size_t buflen = 0;
 	int addr_len=sizeof(hsock->peer_addr);
-	BaseProtocol* proto = hsock->proto;
+	BaseWorker* worker = hsock->worker;
 
 	char* buf = NULL;
 	int rlen, ret = 0;
@@ -650,15 +653,15 @@ static int do_read_udp(HSOCKET hsock){
 		rlen = recvfrom(hsock->fd, buf, buflen, MSG_DONTWAIT, (sockaddr*)&(hsock->peer_addr), (socklen_t*)&addr_len);
 		if (rlen > 0){
 			hsock->offset += rlen;
-			if (hsock->conn_type == UDP_CONN){
+			if (hsock->protocol == UDP_PROTOCOL){
 				if (hsock->_conn_stat < SOCKET_CLOSED){
 					hsock->_flag = 1;
-					proto->ConnectionRecved(hsock, hsock->recv_buf, hsock->offset);
+					worker->ConnectionRecved(hsock, hsock->recv_buf, hsock->offset);
 					hsock->_flag = 0;
 				}
 			}
 #ifdef KCP_SUPPORT
-			else if (hsock->conn_type == KCP_CONN){
+			else if (hsock->protocol == KCP_PROTOCOL){
 				ret = do_read_kcp(hsock);
 				if (ret) break;
 			}
@@ -682,18 +685,18 @@ static int do_read_udp(HSOCKET hsock){
 
 static int do_read(HSOCKET hsock){
 	int ret = 0;
-	switch (hsock->conn_type)
+	switch (hsock->protocol)
 	{
-	case TCP_CONN:
+	case TCP_PROTOCOL:
 		ret = do_read_tcp(hsock);
 		break;
 #ifdef OPENSSL_SUPPORT
-	case SSL_CONN:
+	case SSL_PROTOCOL:
 		ret = do_read_ssl(hsock);
 		break;
 #endif
-	case UDP_CONN:
-	case KCP_CONN:
+	case UDP_PROTOCOL:
+	case KCP_PROTOCOL:
 		ret = do_read_udp(hsock);
 		break;
 	default:
@@ -701,9 +704,9 @@ static int do_read(HSOCKET hsock){
 	}
 	if (ret > 0){
 		if (hsock->_conn_stat < SOCKET_CLOSED){
-			BaseProtocol* proto = hsock->proto;
+			BaseWorker* worker = hsock->worker;
 			hsock->_flag = 1;
-			proto->ConnectionRecved(hsock, hsock->recv_buf, hsock->offset);
+			worker->ConnectionRecved(hsock, hsock->recv_buf, hsock->offset);
 			hsock->_flag = 0;
 		}
 		ret = 0;
@@ -712,12 +715,12 @@ static int do_read(HSOCKET hsock){
 }
 
 static int do_rebind(HSOCKET hsock){
-	BaseProtocol* proto = hsock->proto;
-	proto->socket_count++;
+	BaseWorker* worker = hsock->worker;
+	worker->socket_count++;
 	hsock->_conn_stat = SOCKET_CONNECTED;
 	Rebind_Callback callback = hsock->rebind_call;
 	hsock->_flag = 1;
-	callback(hsock, proto, hsock->call_data);
+	callback(hsock, worker, hsock->call_data);
 	hsock->_flag = 0;
 	return 0;
 }
@@ -726,7 +729,7 @@ static void do_timer(HTIMER hsock){
 	uint64_t value;
 	if (hsock->_conn_stat < SOCKET_CLOSED){
 		Timer_Callback call = hsock->call;
-		call(hsock, hsock->proto, hsock->user_data);
+		call(hsock, hsock->worker, hsock->user_data);
 		if (hsock->_conn_stat < SOCKET_CLOSED && hsock->once == 0){
 			read(hsock->fd, &value, sizeof(uint64_t)); //必须读取，否则定时器异常
 			return;
@@ -739,7 +742,7 @@ static void do_timer(HTIMER hsock){
 
 static void do_event(HEVENT hsock){
 	Event_Callback call = hsock->call;
-	call(hsock->proto, hsock->event_data);
+	call(hsock->worker, hsock->event_data);
 	epoll_del_read(hsock->fd, hsock->epoll_fd);
 	close(hsock->fd);
 	free(hsock);
@@ -747,7 +750,7 @@ static void do_event(HEVENT hsock){
 
 static void do_signal(HSIGNAL hsock){
 	Signal_Callback call = hsock->call;
-	call(hsock->proto, hsock->signal);
+	call(hsock->worker, hsock->signal);
 	epoll_del_read(hsock->fd, hsock->epoll_fd);
 	close(hsock->fd);
 	free(hsock);
@@ -775,20 +778,20 @@ static int do_accept(HSOCKET listenhsock){
 		memcpy(&hsock->peer_addr, &addr, sizeof(addr));
 		socket_set_keepalive(fd);
 
-        BaseProtocol* proto = accepter->ProtocolCreate();
-		if (!proto) {
+        BaseWorker* worker = accepter->GetWorker();
+		if (!worker) {
 			close(fd);
 			release_hsock(hsock);
 		}
-		ThreadStat* ts = ThreadDistribution(proto);
+		ThreadStat* ts = ThreadDistribution(worker);
 
         hsock->fd = fd;
-		hsock->proto = proto;
+		hsock->worker = worker;
 		hsock->epoll_fd = ts->epoll_fd;
 		hsock->_conn_stat = SOCKET_CONNECTING;
 		set_linger_for_fd(fd);
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
-		proto->socket_count++;
+		worker->socket_count++;
 		epoll_add_connect(hsock);
 	}
 	return 1;
@@ -808,7 +811,7 @@ static void read_work_thread(int* efd){
 		for(i = 0; i < n; i++) {
             hsock = (HSOCKET)pev[i].data.ptr;
 			events = pev[i].events;
-			switch(*(CONN_TYPE*)hsock){
+			switch(*(PROTOCOL*)hsock){
 				case TIMER:
 					do_timer((HTIMER)hsock);
 					continue;
@@ -851,7 +854,7 @@ static void read_work_thread(int* efd){
 	}
 }
 
-static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto, void* user_data) {
+static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user_data) {
 	std::map<uint16_t, BaseAccepter*>::iterator iter;
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
@@ -868,8 +871,8 @@ static void accepters_timer_run(){
         return;
     }
 	hsock->fd = tfd;
-	hsock->conn_type = TIMER;
-	hsock->proto = NULL;
+	hsock->protocol = TIMER;
+	hsock->worker = NULL;
 	hsock->call = accepter_timer_callback;
 	hsock->epoll_fd = epoll_listen_fd;
 	hsock->_conn_stat = 0;
@@ -922,7 +925,7 @@ int ReactorStart(){
 	for (int i = 0; i < ActorThreadWorker; i++) {
 		ts = THREAD_STATES_AT(i);
 		ts->epoll_fd = epoll_create(64);
-		ts->ProtocolCount = 0;
+		ts->WorkerCount = 0;
 	}
 
 #ifdef OPENSSL_SUPPORT
@@ -974,7 +977,7 @@ int AccepterStop(BaseAccepter* accepter){
 	return 0;
 }
 
-static bool EpollConnectExUDP(BaseProtocol* proto, HSOCKET hsock, int listen_port){
+static bool EpollConnectExUDP(BaseWorker* worker, HSOCKET hsock, int listen_port){
 	int fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if(fd < 0) {
 		return false;
@@ -998,8 +1001,8 @@ static bool EpollConnectExUDP(BaseProtocol* proto, HSOCKET hsock, int listen_por
 	return true;
 }
 
-HSOCKET HsocketListenUDP(BaseProtocol* proto, int port){
-	if (proto == NULL) 
+HSOCKET HsocketListenUDP(BaseWorker* worker, const char* ip, int port){
+	if (worker == NULL) 
 		return NULL;
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
@@ -1010,24 +1013,26 @@ HSOCKET HsocketListenUDP(BaseProtocol* proto, int port){
 	}
 	hsock->peer_addr.sin6_family = AF_INET6;
 	hsock->peer_addr.sin6_port = htons(port);
-	inet_pton(AF_INET6, "::", &hsock->peer_addr.sin6_addr);
+	char v6ip[40] = { 0x0 };
+	const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, dst, &hsock->peer_addr.sin6_addr);
 
-	hsock->conn_type = UDP_CONN;
-	hsock->proto = proto;
-	ThreadStat* ts = ThreadDistribution(proto);
+	hsock->protocol = UDP_PROTOCOL;
+	hsock->worker = worker;
+	ThreadStat* ts = ThreadDistribution(worker);
 	hsock->epoll_fd = ts->epoll_fd;
 
 	bool ret = false;
-	ret =  EpollConnectExUDP(proto, hsock, port);
+	ret =  EpollConnectExUDP(worker, hsock, port);
 	if (ret == false) {
 		release_hsock(hsock);
 		return NULL;
 	}
-	proto->socket_count++;
+	worker->socket_count++;
 	return hsock;
 }
 
-static bool EpollConnectExTCP(BaseProtocol* proto, HSOCKET hsock){
+static bool EpollConnectExTCP(BaseWorker* worker, HSOCKET hsock){
 	int fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if(fd < 0) {
 		return false;
@@ -1044,8 +1049,8 @@ static bool EpollConnectExTCP(BaseProtocol* proto, HSOCKET hsock){
 	return  true;
 }
 
-HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE type){
-	if (proto == NULL) 
+HSOCKET HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL protocol){
+	if (worker == NULL) 
 		return NULL;
 	HSOCKET hsock = new_hsockt();
 	if (hsock == NULL) 
@@ -1057,28 +1062,28 @@ HSOCKET HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE 
 	hsock->peer_addr.sin6_family = AF_INET6;
 	hsock->peer_addr.sin6_port = htons(port);
 	char v6ip[40] = { 0x0 };
-	socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
-	inet_pton(AF_INET6, v6ip, &hsock->peer_addr.sin6_addr);
+	const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, dst, &hsock->peer_addr.sin6_addr);
 
-	hsock->conn_type = type;
-	hsock->proto = proto;
-	ThreadStat* ts = ThreadDistribution(proto);
+	hsock->protocol = protocol;
+	hsock->worker = worker;
+	ThreadStat* ts = ThreadDistribution(worker);
 	hsock->epoll_fd = ts->epoll_fd;
 
 	bool ret = false;
-	if (type == UDP_CONN)
-		ret =  EpollConnectExUDP(proto, hsock, 0);
-	else if (type == TCP_CONN || type == SSL_CONN)
-		ret = EpollConnectExTCP(proto, hsock);
+	if (protocol == UDP_PROTOCOL)
+		ret =  EpollConnectExUDP(worker, hsock, 0);
+	else if (protocol == TCP_PROTOCOL || protocol == SSL_PROTOCOL)
+		ret = EpollConnectExTCP(worker, hsock);
 	if (ret == false) {
 		release_hsock(hsock);
 		return NULL;
 	}
-	proto->socket_count++;
+	worker->socket_count++;
 	return hsock;
 }
 
-HTIMER TimerCreate(BaseProtocol* proto, void* user_data, int duetime, int looptime, Timer_Callback callback){
+HTIMER TimerCreate(BaseWorker* worker, void* user_data, int duetime, int looptime, Timer_Callback callback){
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock == NULL) 
 		return NULL;
@@ -1088,10 +1093,10 @@ HTIMER TimerCreate(BaseProtocol* proto, void* user_data, int duetime, int loopti
         return NULL;
     }
 	hsock->fd = tfd;
-	hsock->conn_type = TIMER;
-	hsock->proto = proto;
+	hsock->protocol = TIMER;
+	hsock->worker = worker;
 	hsock->call = callback;
-	ThreadStat* ts = proto ? ThreadDistribution(proto) : NULL;
+	ThreadStat* ts = worker ? ThreadDistribution(worker) : NULL;
 	hsock->epoll_fd = ts ? ts->epoll_fd : epoll_listen_fd;
 	hsock->_conn_stat = 0;
 	hsock->once = looptime == 0 ? 1 : 0;
@@ -1113,7 +1118,7 @@ void TimerDelete(HTIMER hsock){
 	hsock->_conn_stat = SOCKET_CLOSED;
 }
 
-void PostEvent(BaseProtocol* proto, void* event_data, Event_Callback callback){
+void PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback){
 	HEVENT hsock = (HEVENT)malloc(sizeof(Event_Content));
 	if (hsock == NULL) return;
 	int efd = eventfd(1, 0);
@@ -1122,16 +1127,16 @@ void PostEvent(BaseProtocol* proto, void* event_data, Event_Callback callback){
 		return;
     }
 	hsock->fd = efd;
-	hsock->conn_type = EVENT;
-	hsock->proto = proto;
+	hsock->protocol = EVENT;
+	hsock->worker = worker;
 	hsock->call = callback;
 	hsock->event_data = event_data;
-	ThreadStat* ts = ThreadDistribution(proto);
+	ThreadStat* ts = ThreadDistribution(worker);
 	hsock->epoll_fd = ts ? ts->epoll_fd : epoll_listen_fd;
 	epoll_add_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
 }
 
-void PostSignal(BaseProtocol* proto, long long signal, Signal_Callback callback){
+void PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback){
 	HSIGNAL hsock = (HSIGNAL)malloc(sizeof(Signal_Content));
 	if (hsock == NULL) return;
 	int efd = eventfd(1, 0);
@@ -1140,11 +1145,11 @@ void PostSignal(BaseProtocol* proto, long long signal, Signal_Callback callback)
 		return;
     }
 	hsock->fd = efd;
-	hsock->conn_type = SIGNAL;
-	hsock->proto = proto;
+	hsock->protocol = SIGNAL;
+	hsock->worker = worker;
 	hsock->call = callback;
 	hsock->signal = signal;
-	ThreadStat* ts = ThreadDistribution(proto);
+	ThreadStat* ts = ThreadDistribution(worker);
 	hsock->epoll_fd = ts ? ts->epoll_fd : epoll_listen_fd;
 	epoll_add_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
 }
@@ -1175,7 +1180,7 @@ static void HsocketSendUdp(HSOCKET hsock, struct sockaddr* addr, int addrlen, co
 }
 
 bool HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len){
-	if (hsock->conn_type == UDP_CONN){
+	if (hsock->protocol == UDP_PROTOCOL){
 		struct sockaddr_in6 toaddr = { 0x0 };
 		toaddr.sin6_family = AF_INET6;
 		toaddr.sin6_port = htons(port);
@@ -1246,21 +1251,21 @@ static void HsocketSendTcp(HSOCKET hsock, const char* data, int len){
 
 bool HsocketSend(HSOCKET hsock, const char* data, int len){
 	if (hsock == NULL || hsock->fd < 0 ||len <= 0) return false;
-	switch (hsock->conn_type)
+	switch (hsock->protocol)
 	{
-	case TCP_CONN:
+	case TCP_PROTOCOL:
 		HsocketSendTcp(hsock, data, len);
 		break;
 #ifdef OPENSSL_SUPPORT
-	case SSL_CONN:
+	case SSL_PROTOCOL:
 		HsocketSendSSL(hsock, data, len);
 		break;
 #endif
-	case  UDP_CONN:
+	case  UDP_PROTOCOL:
 		HsocketSendUdp(hsock, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr), data, len);
 		break;
 #ifdef KCP_SUPPORT
-	case KCP_CONN:
+	case KCP_PROTOCOL:
 		HsocketSendKcp(hsock, data, len);
 		break;
 #endif
@@ -1279,7 +1284,7 @@ void HsocketClose(HSOCKET hsock){
 
 void HsocketClosed(HSOCKET hsock){
 	if (hsock == NULL) return;
-	hsock->proto->socket_count--;
+	hsock->worker->socket_count--;
 	hsock->_conn_stat = SOCKET_CLOSED;
 	epoll_mod_write(hsock);
 	return;
@@ -1287,7 +1292,7 @@ void HsocketClosed(HSOCKET hsock){
 
 int HsocketPopBuf(HSOCKET hsock, int len){
 #ifdef KCP_SUPPORT
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ctx->offset -= len;
 		memmove(ctx->buf, ctx->buf + len, ctx->offset);
@@ -1300,11 +1305,11 @@ int HsocketPopBuf(HSOCKET hsock, int len){
 }
 
 void HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port){
-	if (hsock->conn_type == UDP_CONN || hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == UDP_PROTOCOL || hsock->protocol == KCP_PROTOCOL) {
 		hsock->peer_addr.sin6_port = htons(port);
 		char v6ip[40] = { 0x0 };
-		socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
-		inet_pton(AF_INET6, v6ip, &hsock->peer_addr.sin6_addr);
+		const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, dst, &hsock->peer_addr.sin6_addr);
 	}
 }
 
@@ -1331,19 +1336,19 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 	if (port) *port = ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindProtocol(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback ucall, Rebind_Callback rcall, void* call_data) {
+void __STDCALL HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Unbind_Callback ucall, Rebind_Callback rcall) {
 	hsock->unbind_call = ucall;
 	hsock->rebind_call = rcall;
-	hsock->rebind_proto = proto;
-	hsock->call_data = call_data;
+	hsock->rebind_worker = worker;
+	hsock->call_data = user_data;
 	hsock->_conn_stat = SOCKET_UNBIND;
 }
 
-void __STDCALL HsocketRebindProtocol(HSOCKET hsock, BaseProtocol* proto, Rebind_Callback call, void* call_data) {
+void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call) {
 	hsock->rebind_call = call;
-	hsock->proto = proto;
-	hsock->call_data = call_data;
-	ThreadStat* ts = ThreadDistribution(proto);
+	hsock->worker = worker;
+	hsock->call_data = user_data;
+	ThreadStat* ts = ThreadDistribution(worker);
 	hsock->epoll_fd = ts->epoll_fd;
 	hsock->_conn_stat = SOCKET_REBIND;
 	epoll_add_connect(hsock);
@@ -1362,7 +1367,7 @@ int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
 #ifdef OPENSSL_SUPPORT
 bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key){
 	bool ret = false;
-	if (hsock->conn_type == TCP_CONN){
+	if (hsock->protocol == TCP_PROTOCOL){
 		ret = do_ssl_init(hsock, openssl_type, verify, ca_crt, user_crt, pri_key);
 	}
 	return ret;
@@ -1377,7 +1382,7 @@ static int kcp_send_callback(const char* buf, int len, ikcpcb* kcp, void* kcp_da
 }
 
 int __STDCALL HsocketKcpCreate(HSOCKET hsock, int conv, int mode){
-	if (hsock->conn_type == UDP_CONN) {
+	if (hsock->protocol == UDP_PROTOCOL) {
 		ikcpcb* kcp = ikcp_create(conv, hsock);
 		if (!kcp) return -1;
 		kcp->output = kcp_send_callback;
@@ -1390,27 +1395,27 @@ int __STDCALL HsocketKcpCreate(HSOCKET hsock, int conv, int mode){
 		ctx->size = DATA_BUFSIZE;
 		ctx->offset = 0;
 		hsock->sock_data = ctx;
-		hsock->conn_type = KCP_CONN;
+		hsock->protocol = KCP_PROTOCOL;
 	}
 	return 0;
 }
 
 void __STDCALL HsocketKcpNodelay(HSOCKET hsock, int nodelay, int interval, int resend, int nc){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcp_nodelay(ctx->kcp, nodelay, interval, resend, nc);
 	}
 }
 
 void __STDCALL HsocketKcpWndsize(HSOCKET hsock, int sndwnd, int rcvwnd){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcp_wndsize(ctx->kcp, sndwnd, rcvwnd);
 	}
 }
 
 int __STDCALL HsocketKcpGetconv(HSOCKET hsock){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		return ikcp_getconv(ctx->kcp);
 	}
@@ -1418,7 +1423,7 @@ int __STDCALL HsocketKcpGetconv(HSOCKET hsock){
 }
 
 void __STDCALL HsocketKcpUpdate(HSOCKET hsock){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcp_update(ctx->kcp, iclock());
 	}
@@ -1426,7 +1431,7 @@ void __STDCALL HsocketKcpUpdate(HSOCKET hsock){
 
 int __STDCALL HsocketKcpDebug(HSOCKET hsock, char* buf, int size) {
 	int n = 0;
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcpcb* kcp = ctx->kcp;
 		n = snprintf(buf, size, "nsnd_buf[%d] nsnd_que[%d] nrev_buf[%d] nrev_que[%d] snd_wnd[%d] rev_wnd[%d] rmt_wnd[%d] cwd[%d]",

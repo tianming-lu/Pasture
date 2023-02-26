@@ -24,15 +24,15 @@
 #define TimeSleep(x) sleep(x)
 #endif // __WINDOWS__
 
-class EchoClient : public BaseProtocol		//继承BaseProtocol
+class EchoClient : public BaseWorker		//继承BaseProtocol
 {
 	HSOCKET sock = NULL;
 	HTIMER timer = NULL;
-	void ConnectionMade(HSOCKET hsock, CONN_TYPE type) {
+	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {
 		printf("client 连接成功\n");
 		sock = hsock;
 		/* 创建一个定时器，定时发送 hello world */
-		timer = TimerCreate(this, NULL, 5000, 3000, [](HTIMER timer, BaseProtocol* proto, void* data) {
+		timer = TimerCreate(this, NULL, 5000, 3000, [](HTIMER timer, BaseWorker* proto, void* data) {
 			EchoClient* client = (EchoClient*)proto;
 			HsocketSend(client->sock, "hello world", 11);
 			printf("cient 发送: [hello world]\n");
@@ -50,9 +50,9 @@ class EchoClient : public BaseProtocol		//继承BaseProtocol
 	};
 };
 
-class EchoServer: public BaseProtocol		//继承BaseProtocol
+class EchoServer: public BaseWorker		//继承BaseProtocol
 {
-	void ConnectionMade(HSOCKET hsock, CONN_TYPE type) {};
+	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {};
 	void ConnectionFailed(HSOCKET hsock, int err) {};
 	void ConnectionClosed(HSOCKET hsock, int err) {};
 	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
@@ -64,52 +64,34 @@ class EchoServer: public BaseProtocol		//继承BaseProtocol
 	};
 };
 
-class EchoAccepter: public BaseAccepter		//继承BaseFactory
-{
-public:
-	bool	Init() { 
-		return true; 
-	};
-	void	TimeOut() {
-	};
-	BaseProtocol* ProtocolCreate() {    //accept建立新连接时创建一个EchoProtocol对象
-		EchoServer* proto = new EchoServer;
-		//proto->auto_free(false);   //连接关闭时proto不要被自动释放，由用户控制释放时机
-		//proto->thread_set();   //自动分配工作线程
-		//proto->thread_set(0);   //分配到指定工作线程， 0 ~ ActorThreadWorker - 1 
-		return proto;
-	};
-};
-
 int main(){
 	int listen_port = 8000;
 	//启动全局reactor
 	ReactorStart();  
 
-	//创建监听器并监听指定端口
-	EchoAccepter* accepter = new EchoAccepter();
+	/*通过模板创建一个工厂类*/
+	Factory<EchoServer> factory;
 
-	printf("accepter 启动\n");
-	//accepter->listen("0.0.0.0", listen_port);  //仅ipv4
-	accepter->listen("::", listen_port);		//ipv4、ipv6双协议栈
+	printf("factory 启动\n");
+	//factory.listen("0.0.0.0", listen_port);  //仅ipv4
+	factory.listen("::", listen_port);		//ipv4、ipv6双协议栈
 	printf("正在监听%d端口……\n", listen_port);
-
 
 	printf("创建EchoClient,并连接127.0.0.1:8000\n");
 	EchoClient* client = new EchoClient();
-	HsocketConnect(client, "127.0.0.1", 8000, TCP_CONN);
+	HsocketConnect(client, "127.0.0.1", listen_port, TCP_PROTOCOL);
 
 	TimeSleep(10);
-	printf("accepter 优雅关闭\n");
-	accepter->stop();
+	printf("factory 优雅关闭\n");
+	factory.stop();
 
-	printf("accepter 重启\n");
+	printf("factory 重启\n");
 	listen_port = 8001;
-	accepter->listen("::", listen_port);
+	factory.listen("::", listen_port);
 	printf("正在监听%d端口……\n", listen_port);
-	//TimeSleep(30);
-	//printf("accepter 关闭\n");
-	//accepter->stop();
+	TimeSleep(30);
+	printf("factory 关闭\n");
+	factory.stop();
 
 	while (true){
 		TimeSleep(10);

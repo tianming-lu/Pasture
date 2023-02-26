@@ -32,6 +32,13 @@
 #define REBIND 6
 
 int  ActorThreadWorker = 0;
+
+typedef struct Thread_Content {
+	long	WorkerCount;
+	HANDLE	CompletionPort;
+}ThreadStat;
+#define THREAD_STAT_SIZE sizeof(ThreadStat)
+
 static HANDLE ListenCompletionPort = NULL;
 static ThreadStat* ThreadStats;
 static std::map<uint16_t, BaseAccepter*> Accepters;
@@ -69,42 +76,42 @@ static long ReplaceIoCompletionPort(SOCKET fd, HANDLE CompletionPort, PVOID Comp
 }
 
 #define THREAD_STATES_AT(x) ThreadStats + x;
-ThreadStat* __STDCALL ThreadDistribution(BaseProtocol* proto) {
-	short thread_id = proto->thread_id;
+ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker) {
+	short thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
 	tsa = THREAD_STATES_AT(0);
 	for (int i = 1; i < ActorThreadWorker; i++) {
 		tsb = THREAD_STATES_AT(i);
-		if (tsb->ProtocolCount < tsa->ProtocolCount) {
+		if (tsb->WorkerCount < tsa->WorkerCount) {
 			tsa = tsb;
 			thread_id = i;
 		}
 	}
-	InterlockedIncrement(&tsa->ProtocolCount);
-	proto->thread_id = thread_id;
+	InterlockedIncrement(&tsa->WorkerCount);
+	worker->thread_id = thread_id;
 	return tsa;
 }
 
-ThreadStat* __STDCALL ThreadDistributionIndex(BaseProtocol* proto, int index) {
-	short thread_id = proto->thread_id;
+ThreadStat* __STDCALL ThreadDistributionIndex(BaseWorker* worker, int index) {
+	short thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	if (index > -1 && index < ActorThreadWorker) {
 		ThreadStat* ts = THREAD_STATES_AT(index);
-		InterlockedIncrement(&ts->ProtocolCount);
-		proto->thread_id = index;
+		InterlockedIncrement(&ts->WorkerCount);
+		worker->thread_id = index;
 		return ts;
 	}
 	return NULL;
 }
 
-void __STDCALL ThreadUnDistribution(BaseProtocol* proto) {
-	short thread_id = proto->thread_id;
+void __STDCALL ThreadUnDistribution(BaseWorker* worker) {
+	short thread_id = worker->thread_id;
 	if (thread_id > -1) {
 		ThreadStat* ts = THREAD_STATES_AT(thread_id);
-		InterlockedDecrement(&ts->ProtocolCount);
-		proto->thread_id = -1;
+		InterlockedDecrement(&ts->WorkerCount);
+		worker->thread_id = -1;
 	}
 }
 
@@ -185,9 +192,9 @@ static inline HSOCKET NewIOCP_Socket(){
 
 static inline void ReleaseIOCP_Socket(HSOCKET IocpSock){
 #if defined OPENSSL_SUPPORT || defined KCP_SUPPORT
-	switch (IocpSock->conn_type) {
+	switch (IocpSock->protocol) {
 #ifdef OPENSSL_SUPPORT
-	case SSL_CONN: {
+	case SSL_PROTOCOL: {
 		struct SSL_Content* ssl_ctx = (struct SSL_Content*)IocpSock->sock_data;
 		if (ssl_ctx) {
 			//BIO_free(ssl_ctx->rbio);  //貌似bio会随着SSL_free一起释放，先行释放会引起崩溃，待后续确认
@@ -202,7 +209,7 @@ static inline void ReleaseIOCP_Socket(HSOCKET IocpSock){
 	}
 #endif
 #ifdef KCP_SUPPORT
-	case KCP_CONN: {
+	case KCP_PROTOCOL: {
 		Kcp_Content* ctx = (Kcp_Content*)IocpSock->sock_data;
 		ikcp_release(ctx->kcp);
 		free(ctx->buf);
@@ -281,7 +288,7 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 		return -1;
 	}
 	IocpSock->event_type = ACCEPT;
-	IocpSock->proto = NULL;
+	IocpSock->worker = NULL;
 	IocpSock->sock_data = accepter;
 	IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
 	if (IocpSock->recv_buf == NULL){
@@ -314,9 +321,9 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 	return 0;
 }
 
-static inline void delete_protocol(BaseProtocol* proto) {
-	if (proto->socket_count == 0 && proto->auto_free_flag) {
-		proto->_free();
+static inline void delete_worker(BaseWorker* worker) {
+	if (worker->socket_count == 0 && worker->auto_free_flag) {
+		worker->_free();
 	}
 }
 
@@ -337,20 +344,20 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	case UNBIND: {
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
 		if (!ret) {
-			BaseProtocol* old = IocpSock->proto;
+			BaseWorker* old = IocpSock->worker;
 			old->socket_count--;
 			Unbind_Callback call = IocpSock->unbind_call;
 			if (call) {
-				call(IocpSock, old, IocpSock->rebind_proto, IocpSock->call_data);
+				call(IocpSock, old, IocpSock->rebind_worker, IocpSock->call_data);
 			}
 			else {
-				BaseProtocol* proto = IocpSock->rebind_proto;
-				IocpSock->proto = proto;
+				BaseWorker* worker = IocpSock->rebind_worker;
+				IocpSock->worker = worker;
 				IocpSock->event_type = REBIND;
-				ThreadStat* ts = ThreadDistribution(proto);
+				ThreadStat* ts = ThreadDistribution(worker);
 				PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
 			}
-			delete_protocol(old);
+			delete_worker(old);
 		}
 		return;
 	}
@@ -359,13 +366,13 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	}
 
 	if (IocpSock->fd != INVALID_SOCKET){
-		BaseProtocol* proto = IocpSock->proto;
-		proto->socket_count--;
+		BaseWorker* worker = IocpSock->worker;
+		worker->socket_count--;
 		if (READ == IocpSock->event_type)
-			proto->ConnectionClosed(IocpSock, err);
+			worker->ConnectionClosed(IocpSock, err);
 		else
-			proto->ConnectionFailed(IocpSock, err);
-		delete_protocol(proto);
+			worker->ConnectionFailed(IocpSock, err);
+		delete_worker(worker);
 	}
 	ReleaseIOCP_Socket(IocpSock);
 }
@@ -423,7 +430,7 @@ static void PostRecv(HSOCKET IocpSock){
 	if (ResetIocp_Buff(IocpSock) == false){
 		return do_close(IocpSock, IocpSock->event_type, -1);
 	}
-	if (IocpSock->conn_type == TCP_CONN || IocpSock->conn_type == SSL_CONN)
+	if (IocpSock->protocol == TCP_PROTOCOL || IocpSock->protocol == SSL_PROTOCOL)
 		return PostRecvTCP(IocpSock);
 	return PostRecvUDP(IocpSock);
 }
@@ -435,12 +442,12 @@ static void do_aceept(HSOCKET IocpSock){
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
 	//hsocket_set_keepalive(IocpSock->fd);
 
-	BaseProtocol* proto = accepter->ProtocolCreate();
-	if (proto) {
-		IocpSock->proto = proto;
+	BaseWorker* worker = accepter->GetWorker();
+	if (worker) {
+		IocpSock->worker = worker;
 		IocpSock->sock_data = NULL;
 		IocpSock->event_type = ACCEPTED;
-		ThreadStat* ts = ThreadDistribution(proto);
+		ThreadStat* ts = ThreadDistribution(worker);
 
 		int nSize = sizeof(IocpSock->peer_addr);
 		getpeername(IocpSock->fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
@@ -481,8 +488,8 @@ static void do_read_kcp(HSOCKET IocpSock){
 		}
 		ctx->offset += rlen;
 		if (IocpSock->fd != INVALID_SOCKET){
-			BaseProtocol* proto = IocpSock->proto;
-			proto->ConnectionRecved(IocpSock, ctx->buf, ctx->offset);
+			BaseWorker* worker = IocpSock->worker;
+			worker->ConnectionRecved(IocpSock, ctx->buf, ctx->offset);
 			continue;
 		}
 		return do_close(IocpSock, IocpSock->event_type, 0);
@@ -528,8 +535,8 @@ static void ssl_do_handshake(struct SSL_Content* ssl_ctx, HSOCKET IocpSock) {
 
 	if (r == 1) {
 		if (IocpSock->fd != INVALID_SOCKET) {
-			BaseProtocol* proto = IocpSock->proto;
-			proto->ConnectionMade(IocpSock, IocpSock->conn_type);
+			BaseWorker* worker = IocpSock->worker;
+			worker->ConnectionMade(IocpSock, IocpSock->protocol);
 			PostRecv(IocpSock);
 			return;
 		}
@@ -580,8 +587,8 @@ static void do_read_ssl(HSOCKET IocpSock) {
 		
 		if (ssl_ctx->roffset > 0) {
 			if (IocpSock->fd != INVALID_SOCKET) {
-				BaseProtocol* proto = IocpSock->proto;
-				proto->ConnectionRecved(IocpSock, ssl_ctx->rbuf, ssl_ctx->roffset);
+				BaseWorker* worker = IocpSock->worker;
+				worker->ConnectionRecved(IocpSock, ssl_ctx->rbuf, ssl_ctx->roffset);
 				PostRecv(IocpSock);
 				return;
 			}
@@ -599,8 +606,8 @@ static void do_read_ssl(HSOCKET IocpSock) {
 
 static void do_read_tcp_and_udp(HSOCKET IocpSock) {
 	if (IocpSock->fd != INVALID_SOCKET) {
-		BaseProtocol* proto = IocpSock->proto;
-		proto->ConnectionRecved(IocpSock, IocpSock->recv_buf, IocpSock->offset);
+		BaseWorker* worker = IocpSock->worker;
+		worker->ConnectionRecved(IocpSock, IocpSock->recv_buf, IocpSock->offset);
 		PostRecv(IocpSock);
 		return;
 	}
@@ -608,16 +615,16 @@ static void do_read_tcp_and_udp(HSOCKET IocpSock) {
 }
 
 static void do_read(HSOCKET IocpSock) {
-	switch (IocpSock->conn_type) {
-	case TCP_CONN:
-	case UDP_CONN:
+	switch (IocpSock->protocol) {
+	case TCP_PROTOCOL:
+	case UDP_PROTOCOL:
 		return do_read_tcp_and_udp(IocpSock);
 #ifdef OPENSSL_SUPPORT
-	case SSL_CONN:
+	case SSL_PROTOCOL:
 		return do_read_ssl(IocpSock);
 #endif
 #ifdef KCP_SUPPORT
-	case KCP_CONN:
+	case KCP_PROTOCOL:
 		return do_read_kcp(IocpSock);
 #endif
 	default:
@@ -685,7 +692,7 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, int verify, con
 	SSL_set_bio(ssl_ctx->ssl, ssl_ctx->rbio, ssl_ctx->wbio);
 	openssl_type == SSL_CLIENT? SSL_set_connect_state(ssl_ctx->ssl): SSL_set_accept_state(ssl_ctx->ssl);
 	IocpSock->sock_data = ssl_ctx;
-	IocpSock->conn_type = SSL_CONN;
+	IocpSock->protocol = SSL_PROTOCOL;
 
 	if (openssl_type == SSL_CLIENT) {
 		SSL_do_handshake(ssl_ctx->ssl);
@@ -705,14 +712,14 @@ static void do_connect(HSOCKET IocpSock) {
 	//hsocket_set_keepalive(IocpSock->fd);
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);  //连接成功后刷新套接字属性
 #ifdef OPENSSL_SUPPORT
-	if (IocpSock->conn_type == SSL_CONN) {
+	if (IocpSock->protocol == SSL_PROTOCOL) {
 		return Hsocket_upto_SSL_Client(IocpSock);
 	}
 #endif
 	
 	if (IocpSock->fd != INVALID_SOCKET) {
-		BaseProtocol* proto = IocpSock->proto;
-		proto->ConnectionMade(IocpSock, IocpSock->conn_type);
+		BaseWorker* worker = IocpSock->worker;
+		worker->ConnectionMade(IocpSock, IocpSock->protocol);
 		PostRecv(IocpSock);
 		return;
 	}
@@ -720,40 +727,40 @@ static void do_connect(HSOCKET IocpSock) {
 }
 
 static void do_accepted(HSOCKET IocpSock){
-	BaseProtocol* proto = IocpSock->proto;
-	proto->socket_count++;
-	proto->ConnectionMade(IocpSock, IocpSock->conn_type);
+	BaseWorker* worker = IocpSock->worker;
+	worker->socket_count++;
+	worker->ConnectionMade(IocpSock, IocpSock->protocol);
 	PostRecv(IocpSock);
 }
 
 static void do_rebind(HSOCKET IocpSock) {
-	BaseProtocol* proto = IocpSock->proto;
-	ThreadStat* ts = ThreadDistribution(proto);
+	BaseWorker* worker = IocpSock->worker;
+	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
-	proto->socket_count++;
+	worker->socket_count++;
 	Rebind_Callback callback = IocpSock->rebind_call;
-	callback(IocpSock, proto, IocpSock->call_data);
+	callback(IocpSock, worker, IocpSock->call_data);
 	PostRecv(IocpSock);
 }
 
 static void do_signal(HSIGNAL hsock) {
 	Signal_Callback callback = hsock->call;
-	callback(hsock->proto, hsock->signal);
+	callback(hsock->worker, hsock->signal);
 	free(hsock);
 }
 
 static void do_event(HEVENT hsock) {
 	Event_Callback callback = (Event_Callback)hsock->call;
-	callback(hsock->proto, hsock->event_data);
+	callback(hsock->worker, hsock->event_data);
 	free(hsock);
 }
 
 static void do_timer(HTIMER hsock) {
-	if (!hsock->close) {
+	if (!hsock->closed) {
 		Timer_Callback callback = (Timer_Callback)hsock->call;
-		callback(hsock, hsock->proto, hsock->user_data);
+		callback(hsock, hsock->worker, hsock->user_data);
 		ATOMIC_UNLOCK(hsock->lock);
-		if (!hsock->close && hsock->once == 0) 
+		if (!hsock->closed && hsock->once == 0) 
 			return;
 	}	
 	DeleteTimerQueueTimer(NULL, hsock->timer, INVALID_HANDLE_VALUE);
@@ -798,7 +805,7 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 	while (true){
 		bRet = GetQueuedCompletionStatus(CompletionPort, &dwIoSize, (PULONG_PTR)&CompletKey, (LPOVERLAPPED*)&OverLapped, INFINITE);
 		if (!OverLapped) {  //Overlapped为NULL，说明当前消息不是套接字IO完成消息，而是timer、event、signal
-			switch (*(CONN_TYPE*)CompletKey)
+			switch (*(PROTOCOL*)CompletKey)
 			{
 			case TIMER:
 				do_timer((HTIMER)CompletKey);
@@ -838,7 +845,7 @@ static void timer_queue_callback(HTIMER hsock, BOOLEAN TimerOrWaitFired) {
 	}
 }
 
-static void accepter_timer_callback(HTIMER timer, BaseProtocol* proto, void* user_data) {
+static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user_data) {
 	std::map<uint16_t, BaseAccepter*>::iterator iter;
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
@@ -849,12 +856,12 @@ static void accepters_timer_run() {
 #define ACCEPTOR_TIMER_OUT 1000
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock) {
-		hsock->conn_type = TIMER;
+		hsock->protocol = TIMER;
 		hsock->once = ACCEPTOR_TIMER_OUT == 0? 1: 0;
-		hsock->proto = NULL;
+		hsock->worker = NULL;
 		hsock->call = accepter_timer_callback;
 		hsock->completion_port = ListenCompletionPort;
-		hsock->close = 0;
+		hsock->closed = 0;
 		hsock->lock = 0;
 		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, 1000, ACCEPTOR_TIMER_OUT, 0);
 	}
@@ -900,7 +907,7 @@ int __STDCALL ReactorStart(){
 	for (int i = 0; i < ActorThreadWorker; i++) {
 		ts = THREAD_STATES_AT(i);
 		ts->CompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-		ts->ProtocolCount = 0;
+		ts->WorkerCount = 0;
 	}
 
 	HMODULE ntmodule = GetModuleHandleA("ntdll.dll");
@@ -972,16 +979,16 @@ int __STDCALL AccepterStop(BaseAccepter* accepter){
 	return 0;
 }
 
-HTIMER	__STDCALL TimerCreate(BaseProtocol* proto, void* user_data, int duetime, int looptime, Timer_Callback callback) {
+HTIMER	__STDCALL TimerCreate(BaseWorker* worker, void* user_data, int duetime, int looptime, Timer_Callback callback) {
 	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
 	if (hsock) {
-		hsock->conn_type = TIMER;
+		hsock->protocol = TIMER;
 		hsock->once = looptime == 0 ? 1 : 0;
-		hsock->proto = proto;
+		hsock->worker = worker;
 		hsock->call = callback;
-		ThreadStat* ts = proto ? ThreadDistribution(proto) : NULL;
+		ThreadStat* ts = worker ? ThreadDistribution(worker) : NULL;
 		hsock->completion_port = ts ? ts->CompletionPort : ListenCompletionPort;
-		hsock->close = 0;
+		hsock->closed = 0;
 		hsock->lock = 0;
 		hsock->user_data = user_data;
 		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, duetime, looptime, 0);
@@ -990,34 +997,34 @@ HTIMER	__STDCALL TimerCreate(BaseProtocol* proto, void* user_data, int duetime, 
 }
 
 void __STDCALL TimerDelete(HTIMER hsock) {
-	hsock->close = 1;
+	hsock->closed = 1;
 }
 
-void __STDCALL PostEvent(BaseProtocol* proto, void* event_data, Event_Callback callback) {
+void __STDCALL PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback) {
 	HEVENT hsock = (HEVENT)malloc(sizeof(Event_Content));
 	if (hsock) {
-		hsock->conn_type = EVENT;
-		hsock->proto = proto;
+		hsock->protocol = EVENT;
+		hsock->worker = worker;
 		hsock->call = callback;
 		hsock->event_data = event_data;
-		ThreadStat* ts = proto ? ThreadDistribution(proto) : NULL;
+		ThreadStat* ts = worker ? ThreadDistribution(worker) : NULL;
 		PostQueuedCompletionStatus(ts ? ts->CompletionPort : ListenCompletionPort, 0, (ULONG_PTR)hsock, NULL);
 	}
 }
 
-void __STDCALL PostSignal(BaseProtocol* proto, long long signal, Signal_Callback callback) {
+void __STDCALL PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback) {
 	HSIGNAL hsock = (HSIGNAL)malloc(sizeof(Signal_Content));
 	if (hsock) {
-		hsock->conn_type = SIGNAL;
-		hsock->proto = proto;
+		hsock->protocol = SIGNAL;
+		hsock->worker = worker;
 		hsock->call = callback;
 		hsock->signal = signal;
-		ThreadStat* ts = proto ? ThreadDistribution(proto) : NULL;
+		ThreadStat* ts = worker ? ThreadDistribution(worker) : NULL;
 		PostQueuedCompletionStatus(ts ? ts->CompletionPort : ListenCompletionPort, 0, (ULONG_PTR)hsock, NULL);
 	}
 }
 
-static bool IOCPConnectUDP(BaseProtocol* proto, HSOCKET IocpSock, int listen_port)
+static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, int listen_port)
 {
 	IocpSock->fd = WSASocket(AF_INET6, SOCK_DGRAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (IocpSock->fd == INVALID_SOCKET) return false;
@@ -1035,7 +1042,7 @@ static bool IOCPConnectUDP(BaseProtocol* proto, HSOCKET IocpSock, int listen_por
 	if (ResetIocp_Buff(IocpSock) == false){
 		return false;
 	}
-	ThreadStat* ts = ThreadDistribution(proto);
+	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 	IocpSock->event_type = READ;
 	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG,
@@ -1047,29 +1054,31 @@ static bool IOCPConnectUDP(BaseProtocol* proto, HSOCKET IocpSock, int listen_por
 	return true;
 }
 
-HSOCKET __STDCALL HsocketListenUDP(BaseProtocol* proto, int port){
-	if (proto == NULL) return NULL;
+HSOCKET __STDCALL HsocketListenUDP(BaseWorker* worker, const char* ip, int port){
+	if (worker == NULL) return NULL;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL; 
 
 	IocpSock->event_type = CONNECT;
-	IocpSock->conn_type = UDP_CONN;
-	IocpSock->proto = proto;
+	IocpSock->protocol = UDP_PROTOCOL;
+	IocpSock->worker = worker;
 	IocpSock->peer_addr.sin6_family = AF_INET6;
 	IocpSock->peer_addr.sin6_port = htons(0);
-	inet_pton(AF_INET6, "::", &IocpSock->peer_addr.sin6_addr);
+	char v6ip[40] = { 0x0 };
+	const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, dst, &IocpSock->peer_addr.sin6_addr);
 
 	bool ret = false;
-	ret = IOCPConnectUDP(proto, IocpSock, port);   //UDP连接
+	ret = IOCPConnectUDP(worker, IocpSock, port);   //UDP连接
 	if (ret == false){
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}
-	proto->socket_count++;
+	worker->socket_count++;
 	return 0;
 }
 
-static bool IOCPConnectTCP(BaseProtocol* proto, HSOCKET IocpSock){
+static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock){
 	IocpSock->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (IocpSock->fd == INVALID_SOCKET) return false;
 	struct sockaddr_in6 local_addr;
@@ -1079,7 +1088,7 @@ static bool IOCPConnectTCP(BaseProtocol* proto, HSOCKET IocpSock){
 	if (bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
-	ThreadStat* ts = ThreadDistribution(proto);
+	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 
 	PVOID lpSendBuffer = NULL;
@@ -1100,14 +1109,14 @@ static bool IOCPConnectTCP(BaseProtocol* proto, HSOCKET IocpSock){
 	return true;
 }
 
-HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, CONN_TYPE conntype){
-	if (proto == NULL) return NULL;
+HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL conntype){
+	if (worker == NULL) return NULL;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL;
 
 	IocpSock->event_type = CONNECT;
-	IocpSock->conn_type = conntype > TIMER ? TCP_CONN: conntype;
-	IocpSock->proto = proto;
+	IocpSock->protocol = conntype > TIMER ? TCP_PROTOCOL: conntype;
+	IocpSock->worker = worker;
 	IocpSock->peer_addr.sin6_family = AF_INET6;
 	IocpSock->peer_addr.sin6_port = htons(port);
 
@@ -1116,10 +1125,10 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 	inet_pton(AF_INET6, dst, &IocpSock->peer_addr.sin6_addr);
 
 	bool ret = false;
-	if (conntype == TCP_CONN || conntype == SSL_CONN)
-		ret = IOCPConnectTCP(proto, IocpSock);   //TCP连接
-	else if (conntype == UDP_CONN || conntype == KCP_CONN)
-		ret = IOCPConnectUDP(proto, IocpSock, 0);   //UDP连接
+	if (conntype == TCP_PROTOCOL || conntype == SSL_PROTOCOL)
+		ret = IOCPConnectTCP(worker, IocpSock);   //TCP连接
+	else if (conntype == UDP_PROTOCOL || conntype == KCP_PROTOCOL)
+		ret = IOCPConnectUDP(worker, IocpSock, 0);   //UDP连接
 	else {
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
@@ -1128,7 +1137,7 @@ HSOCKET __STDCALL HsocketConnect(BaseProtocol* proto, const char* ip, int port, 
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}
-	proto->socket_count++;
+	worker->socket_count++;
 	return IocpSock;
 }
 
@@ -1167,9 +1176,9 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 	IocpBuff->databuf.len = len;
 
 	bool ret = false;
-	if (IocpSock->conn_type == TCP_CONN || IocpSock->conn_type == SSL_CONN)
+	if (IocpSock->protocol == TCP_PROTOCOL || IocpSock->protocol == SSL_PROTOCOL)
 		ret = IOCPPostSendTCPEx(IocpSock, IocpBuff);
-	else if (IocpSock->conn_type == UDP_CONN || IocpSock->conn_type == KCP_CONN)
+	else if (IocpSock->protocol == UDP_PROTOCOL || IocpSock->protocol == KCP_PROTOCOL)
 		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr));
 	if (ret == false){
 		free(IocpBuff->databuf.buf);
@@ -1205,16 +1214,16 @@ static bool HsocketSendKcp(HSOCKET hsock, const char* data, int len) {
 
 bool __STDCALL HsocketSend(HSOCKET hsock, const char* data, int len) {
 	if (hsock) {
-		switch (hsock->conn_type){
-		case TCP_CONN:
-		case UDP_CONN:
+		switch (hsock->protocol){
+		case TCP_PROTOCOL:
+		case UDP_PROTOCOL:
 			return HsocketSendEx(hsock, data, len);
 #ifdef OPENSSL_SUPPORT
-		case SSL_CONN:
+		case SSL_PROTOCOL:
 			return HsocketSendSSL(hsock, data, len);
 #endif
 #ifdef KCP_SUPPORT
-		case KCP_CONN:
+		case KCP_PROTOCOL:
 			return HsocketSendKcp(hsock, data, len);
 #endif
 		default:
@@ -1225,7 +1234,7 @@ bool __STDCALL HsocketSend(HSOCKET hsock, const char* data, int len) {
 }
 
 bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len) {
-	if (hsock->conn_type == UDP_CONN){
+	if (hsock->protocol == UDP_PROTOCOL){
 		HSENDBUFF IocpBuff = (HSENDBUFF)malloc(sizeof(Socket_Send_Content));
 		if (IocpBuff == NULL) {
 			printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -1273,20 +1282,20 @@ void __STDCALL HsocketClosed(HSOCKET hsock) {
 	if (!hsock || hsock->fd == INVALID_SOCKET || hsock->fd == NULL) return;
 	closesocket(hsock->fd);
 	hsock->fd = INVALID_SOCKET;
-	hsock->proto->socket_count--;
+	hsock->worker->socket_count--;
 }
 
 int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 {
-	switch (hsock->conn_type) {
-	case TCP_CONN:
-	case UDP_CONN:{
+	switch (hsock->protocol) {
+	case TCP_PROTOCOL:
+	case UDP_PROTOCOL:{
 		hsock->offset -= len;
 		memmove(hsock->recv_buf, hsock->recv_buf + len, hsock->offset);
 		return hsock->offset;
 	}
 #ifdef OPENSSL_SUPPORT
-	case SSL_CONN:{
+	case SSL_PROTOCOL:{
 		struct SSL_Content* ssl_ctx = (struct SSL_Content*)hsock->sock_data;
 		ssl_ctx->roffset -= len;
 		memmove(ssl_ctx->rbuf, ssl_ctx->rbuf + len, ssl_ctx->roffset);
@@ -1294,7 +1303,7 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 	}
 #endif
 #ifdef KCP_SUPPORT
-	case KCP_CONN:{
+	case KCP_PROTOCOL:{
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ctx->offset -= len;
 		memmove(ctx->buf, ctx->buf + len, ctx->offset);
@@ -1308,7 +1317,7 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 }
 
 void __STDCALL HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port) {
-	if (hsock->conn_type == UDP_CONN || hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == UDP_PROTOCOL || hsock->protocol == KCP_PROTOCOL) {
 		hsock->peer_addr.sin6_port = htons(port);
 		char v6ip[40] = { 0x0 };
 		const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
@@ -1339,20 +1348,20 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 	if (port) *port = ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindProtocol(HSOCKET hsock, BaseProtocol* proto, Unbind_Callback ucall, Rebind_Callback rcall, void* call_data) {
-	hsock->rebind_proto = proto;
+void __STDCALL HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Unbind_Callback ucall, Rebind_Callback rcall) {
+	hsock->rebind_worker = worker;
 	hsock->unbind_call = ucall;
 	hsock->rebind_call = rcall;
-	hsock->call_data = call_data;
+	hsock->call_data = user_data;
 	hsock->event_type = UNBIND;
 }
 
-void __STDCALL HsocketRebindProtocol(HSOCKET hsock, BaseProtocol* proto, Rebind_Callback call, void* call_data) {
+void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call) {
 	hsock->rebind_call = call;
-	hsock->call_data = call_data;
-	hsock->proto = proto;
+	hsock->call_data = user_data;
+	hsock->worker = worker;
 	hsock->event_type = REBIND;
-	ThreadStat* ts = ThreadDistribution(proto);
+	ThreadStat* ts = ThreadDistribution(worker);
 	HANDLE CompletionPort = ts->CompletionPort;
 	PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, (LPOVERLAPPED)&hsock->overlapped);
 }
@@ -1370,7 +1379,7 @@ int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {
 #ifdef OPENSSL_SUPPORT
 bool __STDCALL HsocketSSLCreate(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key) {
 	bool ret = false;
-	if (hsock->conn_type == TCP_CONN) {
+	if (hsock->protocol == TCP_PROTOCOL) {
 		ret = Hsocket_SSL_init(hsock, openssl_type, verify, ca_crt, user_crt, pri_key);
 	}
 	return ret;
@@ -1384,7 +1393,7 @@ static int kcp_send_callback(const char* buf, int len, ikcpcb* kcp, void* hsock)
 }
 
 int __STDCALL HsocketKcpCreate(HSOCKET hsock, int conv, int mode){
-	if (hsock->conn_type == UDP_CONN) {
+	if (hsock->protocol == UDP_PROTOCOL) {
 		ikcpcb* kcp = ikcp_create(conv, hsock);
 		if (!kcp) return -1;
 		kcp->output = kcp_send_callback;
@@ -1397,27 +1406,27 @@ int __STDCALL HsocketKcpCreate(HSOCKET hsock, int conv, int mode){
 		ctx->size = DATA_BUFSIZE;
 		ctx->offset = 0;
 		hsock->sock_data = ctx;
-		hsock->conn_type = KCP_CONN;
+		hsock->protocol = KCP_PROTOCOL;
 	}
 	return 0;
 }
 
 void __STDCALL HsocketKcpNodelay(HSOCKET hsock, int nodelay, int interval, int resend, int nc){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcp_nodelay(ctx->kcp, nodelay, interval, resend, nc);
 	}
 }
 
 void __STDCALL HsocketKcpWndsize(HSOCKET hsock, int sndwnd, int rcvwnd){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcp_wndsize(ctx->kcp, sndwnd, rcvwnd);
 	}
 }
 
 int __STDCALL HsocketKcpGetconv(HSOCKET hsock){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		return ikcp_getconv(ctx->kcp);
 	}
@@ -1425,7 +1434,7 @@ int __STDCALL HsocketKcpGetconv(HSOCKET hsock){
 }
 
 void __STDCALL HsocketKcpUpdate(HSOCKET hsock){
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcp_update(ctx->kcp, iclock());
 	}
@@ -1433,7 +1442,7 @@ void __STDCALL HsocketKcpUpdate(HSOCKET hsock){
 
 int __STDCALL HsocketKcpDebug(HSOCKET hsock, char* buf, int size) {
 	int n = 0;
-	if (hsock->conn_type == KCP_CONN) {
+	if (hsock->protocol == KCP_PROTOCOL) {
 		Kcp_Content* ctx = (Kcp_Content*)hsock->sock_data;
 		ikcpcb* kcp = ctx->kcp;
 		n = snprintf(buf, size, "nsnd_buf[%d] nsnd_que[%d] nrev_buf[%d] nrev_que[%d] snd_wnd[%d] rev_wnd[%d] rmt_wnd[%d] cwd[%d]",

@@ -35,7 +35,7 @@ echoServer.cpp    回显服务
 #define TimeSleep(x) sleep(x)
 #endif // __WINDOWS__
 
-class EchoClient : public BaseWorker		//继承BaseProtocol
+class EchoClient : public BaseWorker		//继承BaseWorker
 {
 	HSOCKET sock = NULL;
 	HTIMER timer = NULL;
@@ -61,7 +61,7 @@ class EchoClient : public BaseWorker		//继承BaseProtocol
 	};
 };
 
-class EchoServer: public BaseWorker		//继承BaseProtocol
+class EchoServer: public BaseWorker		//继承BaseWorker
 {
 	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {};
 	void ConnectionFailed(HSOCKET hsock, int err) {};

@@ -1358,6 +1358,7 @@ void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user
 
 	if (hsock->worker) return;
 
+	hsock->worker = worker;
 	ThreadStat* ts = ThreadDistribution(worker);
 	hsock->epoll_fd = ts->epoll_fd;
 	epoll_add_connect(hsock);

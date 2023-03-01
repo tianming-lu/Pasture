@@ -1371,6 +1371,7 @@ void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user
 
 	if (hsock->worker) return;
 
+	hsock->worker = worker;
 	ThreadStat* ts = ThreadDistribution(worker);
 	HANDLE CompletionPort = ts->CompletionPort;
 	PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, (LPOVERLAPPED)&hsock->overlapped);

@@ -314,18 +314,25 @@ static void do_close(HSOCKET hsock){
 		epoll_del_read(hsock->fd, hsock->epoll_fd);
 		BaseWorker* old = hsock->worker;
 		old->socket_count--;
+		hsock->worker = NULL;
 		Unbind_Callback call = hsock->unbind_call;
-		if (call){
-			call(hsock, old, hsock->rebind_worker, hsock->call_data);
-		}
-		else{
-			BaseWorker* worker = hsock->rebind_worker;
-			hsock->worker = worker;
-			ThreadStat* ts = ThreadDistribution(worker);
-			hsock->epoll_fd = ts->epoll_fd;
-			hsock->_conn_stat = SOCKET_REBIND;
-			epoll_add_connect(hsock);
-		}
+		call(hsock, old, hsock->call_data);
+
+		delete_worker(old);
+		return;
+	}
+	else if (hsock->_conn_stat == SOCKET_REBIND) {
+		epoll_del_read(hsock->fd, hsock->epoll_fd);
+		BaseWorker* old = hsock->worker;
+		old->socket_count--;
+
+		BaseWorker* worker = hsock->rebind_worker;
+		hsock->worker = worker;
+		ThreadStat* ts = ThreadDistribution(worker);
+		hsock->epoll_fd = ts->epoll_fd;
+		hsock->_conn_stat = SOCKET_REBIND;
+		epoll_add_connect(hsock);
+
 		delete_worker(old);
 		return;
 	}
@@ -1336,21 +1343,23 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 	if (port) *port = ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Unbind_Callback ucall, Rebind_Callback rcall) {
-	hsock->unbind_call = ucall;
-	hsock->rebind_call = rcall;
+void __STDCALL HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Unbind_Callback ucall) {
 	hsock->rebind_worker = worker;
+	hsock->unbind_call = ucall;
 	hsock->call_data = user_data;
 	hsock->_conn_stat = SOCKET_UNBIND;
 }
 
 void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call) {
+	hsock->rebind_worker = worker;
 	hsock->rebind_call = call;
-	hsock->worker = worker;
 	hsock->call_data = user_data;
+	hsock->_conn_stat = SOCKET_REBIND;
+
+	if (hsock->worker) return;
+
 	ThreadStat* ts = ThreadDistribution(worker);
 	hsock->epoll_fd = ts->epoll_fd;
-	hsock->_conn_stat = SOCKET_REBIND;
 	epoll_add_connect(hsock);
 }
 

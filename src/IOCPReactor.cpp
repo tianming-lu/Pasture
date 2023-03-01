@@ -346,17 +346,25 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		if (!ret) {
 			BaseWorker* old = IocpSock->worker;
 			old->socket_count--;
+			IocpSock->worker = NULL;
 			Unbind_Callback call = IocpSock->unbind_call;
-			if (call) {
-				call(IocpSock, old, IocpSock->rebind_worker, IocpSock->call_data);
-			}
-			else {
-				BaseWorker* worker = IocpSock->rebind_worker;
-				IocpSock->worker = worker;
-				IocpSock->event_type = REBIND;
-				ThreadStat* ts = ThreadDistribution(worker);
-				PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
-			}
+			call(IocpSock, old, IocpSock->call_data);
+			delete_worker(old);
+		}
+		return;
+	}
+	case REBIND: {
+		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
+		if (!ret) {
+			BaseWorker* old = IocpSock->worker;
+			old->socket_count--;
+
+			BaseWorker* worker = IocpSock->rebind_worker;
+			IocpSock->worker = worker;
+			IocpSock->event_type = REBIND;
+			ThreadStat* ts = ThreadDistribution(worker);
+			PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
+
 			delete_worker(old);
 		}
 		return;
@@ -423,8 +431,8 @@ static inline void PostRecvTCP(HSOCKET IocpSock){
 }
 
 static void PostRecv(HSOCKET IocpSock){
-	if (IocpSock->event_type == UNBIND)
-		return do_close(IocpSock, UNBIND, 0);
+	if (IocpSock->event_type == UNBIND || IocpSock->event_type == REBIND)
+		return do_close(IocpSock, IocpSock->event_type, 0);
 
 	IocpSock->event_type = READ;
 	if (ResetIocp_Buff(IocpSock) == false){
@@ -1348,19 +1356,21 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 	if (port) *port = ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Unbind_Callback ucall, Rebind_Callback rcall) {
+void __STDCALL HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Unbind_Callback ucall) {
 	hsock->rebind_worker = worker;
 	hsock->unbind_call = ucall;
-	hsock->rebind_call = rcall;
 	hsock->call_data = user_data;
 	hsock->event_type = UNBIND;
 }
 
 void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call) {
+	hsock->rebind_worker = worker;
 	hsock->rebind_call = call;
 	hsock->call_data = user_data;
-	hsock->worker = worker;
 	hsock->event_type = REBIND;
+
+	if (hsock->worker) return;
+
 	ThreadStat* ts = ThreadDistribution(worker);
 	HANDLE CompletionPort = ts->CompletionPort;
 	PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, (LPOVERLAPPED)&hsock->overlapped);

@@ -29,7 +29,7 @@
 //#define KCP_SUPPORT
 
 /*打开此宏定义，为BaseWorker、HSOCKET以及HTIMER 提供C++风格的接口*/
-#define CPP_FORMAT_API   
+//#define CPP_FORMAT_API   
 
 #ifdef __WINDOWS__
 #define __STDCALL __stdcall
@@ -93,7 +93,7 @@ typedef struct Socket_Content* HSOCKET;
 typedef void (*Timer_Callback) (HTIMER, BaseWorker*, void*);
 typedef void (*Event_Callback)(BaseWorker*, void*);
 typedef void (*Signal_Callback)(BaseWorker*, long long);
-typedef void (*Unbind_Callback)(HSOCKET, BaseWorker*, BaseWorker*, void*);
+typedef void (*Unbind_Callback)(HSOCKET, BaseWorker*, void*);
 typedef void (*Rebind_Callback)(HSOCKET, BaseWorker*, void*);
 
 #ifdef __cplusplus

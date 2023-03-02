@@ -1343,8 +1343,7 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 	if (port) *port = ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Unbind_Callback ucall) {
-	hsock->rebind_worker = worker;
+void __STDCALL HsocketUnbindWorker(HSOCKET hsock, void* user_data, Unbind_Callback ucall) {
 	hsock->unbind_call = ucall;
 	hsock->call_data = user_data;
 	hsock->_conn_stat = SOCKET_UNBIND;

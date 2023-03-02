@@ -126,7 +126,7 @@ extern "C"
 	Reactor_API void	__STDCALL	PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback);
 	Reactor_API void	__STDCALL	PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback);
 
-	Reactor_API void	__STDCALL	HsocketUnbindWorker(HSOCKET hsock, BaseWorker* worker, void* usr_data, Unbind_Callback ucall);
+	Reactor_API void	__STDCALL	HsocketUnbindWorker(HSOCKET hsock, void* usr_data, Unbind_Callback ucall);
 	Reactor_API void	__STDCALL	HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call);
 	Reactor_API int		__STDCALL	GetHostByName(const char* name, char* buf, size_t size);
 

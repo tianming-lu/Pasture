@@ -64,7 +64,7 @@ ThreadStat* ThreadDistribution(BaseWorker* worker) {
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
 	tsa = THREAD_STATES_AT(0);
-	for (int i = 1; i < ActorThreadWorker; i++) {
+	for (int i = 1; i <= ActorThreadWorker; i++) {
 		tsb = THREAD_STATES_AT(i);
 		tsb = THREAD_STATES_AT(i);
 		if (tsb->WorkerCount < tsa->WorkerCount) {
@@ -80,10 +80,13 @@ ThreadStat* ThreadDistribution(BaseWorker* worker) {
 ThreadStat* ThreadDistributionIndex(BaseWorker* worker, int index) {
 	short thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
-	ThreadStat* tsa = THREAD_STATES_AT(index);
-	__sync_add_and_fetch(&tsa->WorkerCount, 1);
-	worker->thread_id = index;
-	return tsa;
+	if (index > -1 && index <= ActorThreadWorker) {
+		ThreadStat* tsa = THREAD_STATES_AT(index);
+		__sync_add_and_fetch(&tsa->WorkerCount, 1);
+		worker->thread_id = index;
+		return tsa;
+	}
+	return NULL;
 }
 
 void ThreadUnDistribution(BaseWorker* worker) {
@@ -868,6 +871,7 @@ static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
 	}
+	ATOMIC_UNLOCK(AcceptersLock);
 }
 
 static void accepters_timer_run(){
@@ -899,18 +903,11 @@ static void accepters_timer_run(){
 }
 
 static int runEpollServer(){
-    int i = 0;
-	int rc;
-
+    int i,rc;
 	pthread_attr_t rattr;
    	pthread_t rtid;
-	pthread_attr_init(&rattr);
-	if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, &epoll_listen_fd)) != 0){
-		return -1;
-	}
-
 	ThreadStat* ts;
-    for (i = 0; i < ActorThreadWorker; i++){
+    for (i = 0; i <= ActorThreadWorker; i++){
 		ts = THREAD_STATES_AT(i);
 		pthread_attr_init(&rattr);
 		if((rc = pthread_create(&rtid, &rattr, (void*(*)(void*))read_work_thread, &ts->epoll_fd)) != 0){
@@ -927,10 +924,12 @@ int ReactorStart(){
 		return -1;
 
 	ActorThreadWorker = get_nprocs_conf();
-
-	ThreadStats = (ThreadStat*)malloc(ActorThreadWorker * sizeof(ThreadStat));
+	ThreadStats = (ThreadStat*)malloc((ActorThreadWorker+1) * sizeof(ThreadStat));
 	if (!ThreadStats) return -2;
 	ThreadStat* ts;
+	ts = THREAD_STATES_AT(ActorThreadWorker);
+	ts->epoll_fd = epoll_listen_fd;
+	ts->WorkerCount = 0;
 	for (int i = 0; i < ActorThreadWorker; i++) {
 		ts = THREAD_STATES_AT(i);
 		ts->epoll_fd = epoll_create(64);

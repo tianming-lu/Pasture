@@ -83,7 +83,7 @@ ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker) {
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
 	tsa = THREAD_STATES_AT(0);
-	for (int i = 1; i < ActorThreadWorker; i++) {
+	for (int i = 1; i <= ActorThreadWorker; i++) {
 		tsb = THREAD_STATES_AT(i);
 		if (tsb->WorkerCount < tsa->WorkerCount) {
 			tsa = tsb;
@@ -98,7 +98,7 @@ ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker) {
 ThreadStat* __STDCALL ThreadDistributionIndex(BaseWorker* worker, int index) {
 	short thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
-	if (index > -1 && index < ActorThreadWorker) {
+	if (index > -1 && index <= ActorThreadWorker) {
 		ThreadStat* ts = THREAD_STATES_AT(index);
 		InterlockedIncrement(&ts->WorkerCount);
 		worker->thread_id = index;
@@ -863,6 +863,7 @@ static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
 	}
+	ATOMIC_UNLOCK(AcceptersLock);
 }
 
 static void accepters_timer_run() {
@@ -882,14 +883,8 @@ static void accepters_timer_run() {
 
 static int runIOCPServer(){
 	HANDLE ThreadHandle = NULL;
-	ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ListenCompletionPort, 0, NULL);
-	if (NULL == ThreadHandle) {
-		return -4;
-	}
-	CloseHandle(ThreadHandle);
-
 	ThreadStat* ts;
-	for (int i = 0; i < ActorThreadWorker; i++){
+	for (int i = 0; i <= ActorThreadWorker; i++){
 		ts = THREAD_STATES_AT(i);
 		ThreadHandle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)serverWorkerThread, ts->CompletionPort, 0, NULL);
 		if (NULL == ThreadHandle) {
@@ -907,16 +902,19 @@ int __STDCALL ReactorStart(){
 		return SOCKET_ERROR;
 	}
 
-	ListenCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-	if (!ListenCompletionPort) return -1;
-
 	SYSTEM_INFO sysInfor;
 	GetSystemInfo(&sysInfor);
 	ActorThreadWorker = sysInfor.dwNumberOfProcessors;
-
-	ThreadStats = (ThreadStat*)malloc(ActorThreadWorker * sizeof(ThreadStat));
+	ThreadStats = (ThreadStat*)malloc((ActorThreadWorker+1) * sizeof(ThreadStat));
 	if (!ThreadStats) return -2;
+
 	ThreadStat* ts;
+	ListenCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+	if (!ListenCompletionPort) return -1;
+	ts = THREAD_STATES_AT(ActorThreadWorker);
+	ts->CompletionPort = ListenCompletionPort;
+	ts->WorkerCount = 0;
+	
 	for (int i = 0; i < ActorThreadWorker; i++) {
 		ts = THREAD_STATES_AT(i);
 		ts->CompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);

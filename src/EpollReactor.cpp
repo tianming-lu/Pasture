@@ -42,6 +42,7 @@ typedef struct Thread_Content {
 
 static int epoll_listen_fd = 0;
 static ThreadStat* ThreadStats;
+static char AcceptersLock;
 static  std::map<uint16_t, BaseAccepter*> Accepters;
 
 enum SOCKET_STAT:char{
@@ -862,6 +863,7 @@ static void read_work_thread(int* efd){
 }
 
 static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user_data) {
+	if (!ATOMIC_TRYLOCK(AcceptersLock)) { return; }
 	std::map<uint16_t, BaseAccepter*>::iterator iter;
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
@@ -965,12 +967,16 @@ int	AccepterRun(BaseAccepter* accepter){
 		hsock->_conn_stat = SOCKET_ACCEPTING;
 		epoll_add_accept(hsock);
 	}
-	Accepters.insert(std::pair<uint16_t, BaseAccepter*>(accepter->ServerPort, accepter));
+	ATOMIC_LOCK(AcceptersLock);
+	Accepters.insert(std::make_pair(accepter->ServerPort, accepter));
+	ATOMIC_UNLOCK(AcceptersLock);
 	return 0;
 }
 
 int AccepterStop(BaseAccepter* accepter){
+	ATOMIC_LOCK(AcceptersLock);
 	Accepters.erase(accepter->ServerPort);
+	ATOMIC_UNLOCK(AcceptersLock);
 	if (accepter->Listenfd > 0) {
 		close(accepter->Listenfd);
 		accepter->Listenfd = 0;

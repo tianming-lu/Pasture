@@ -42,6 +42,7 @@ typedef struct Thread_Content {
 static HANDLE ListenCompletionPort = NULL;
 static ThreadStat* ThreadStats;
 static std::map<uint16_t, BaseAccepter*> Accepters;
+static char AcceptersLock;
 
 static LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 static LPFN_CONNECTEX lpfnConnectEx = NULL;
@@ -253,6 +254,8 @@ static inline SOCKET get_listen_sock(const char* ip, int port){
 	//server_addr.sin6_addr = in6addr_any;
 	socket_set_v6only(listenSock, 0);
 
+	u_long nonblock = 1;
+	ioctlsocket(listenSock, FIONBIO, &nonblock);
 	int ret = bind(listenSock, (struct sockaddr*)&server_addr, sizeof(server_addr));
 	if (ret != 0){
 		closesocket(listenSock);
@@ -305,7 +308,8 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 		ReleaseIOCP_Socket(IocpSock);
 		return -3;
 	}
-
+	u_long nonblock = 1;
+	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
 	bool rc = lpfnAcceptEx(accepter->Listenfd, IocpSock->fd,
 		IocpSock->databuf.buf, 0,
@@ -854,6 +858,7 @@ static void timer_queue_callback(HTIMER hsock, BOOLEAN TimerOrWaitFired) {
 }
 
 static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user_data) {
+	if (!ATOMIC_TRYLOCK(AcceptersLock)) { return; }
 	std::map<uint16_t, BaseAccepter*>::iterator iter;
 	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
 		iter->second->TimeOut();
@@ -968,12 +973,16 @@ int __STDCALL AccepterRun(BaseAccepter* accepter){
 			return -3;
 		}
 	}
-	Accepters.insert(std::pair<uint16_t, BaseAccepter*>(accepter->ServerPort, accepter));
+	ATOMIC_LOCK(AcceptersLock);
+	Accepters.insert(std::make_pair(accepter->ServerPort, accepter));
+	ATOMIC_UNLOCK(AcceptersLock);
 	return 0;
 }
 
 int __STDCALL AccepterStop(BaseAccepter* accepter){
+	ATOMIC_LOCK(AcceptersLock);
 	Accepters.erase(accepter->ServerPort);
+	ATOMIC_UNLOCK(AcceptersLock);
 	if (accepter->Listenfd) {
 		closesocket(accepter->Listenfd);
 		accepter->Listenfd = NULL;
@@ -1043,6 +1052,9 @@ static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, int listen_port
 	local_addr.sin6_port = ntohs(listen_port);
 	local_addr.sin6_addr = in6addr_any;
 	socket_set_v6only(IocpSock->fd, 0);
+
+	u_long nonblock = 1;
+	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
 	if (bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
@@ -1093,6 +1105,9 @@ static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock){
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin6_family = AF_INET6;
 	socket_set_v6only(IocpSock->fd, 0);
+
+	u_long nonblock = 1;
+	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
 	if (bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}

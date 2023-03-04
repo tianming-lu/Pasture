@@ -20,16 +20,15 @@
 
 #define API_EXPORTS
 
+/*打开此宏定义，支持SSL安全连接，需要依赖openssl*/
 //#define OPENSSL_SUPPORT
 #ifdef OPENSSL_SUPPORT
 #define SSL_SERVER 0
 #define SSL_CLIENT 1
 #endif
 
+/*打开此宏定义，支持KCP连接，需要依赖 https://github.com/skywind3000/kcp */
 //#define KCP_SUPPORT
-
-/*打开此宏定义，为BaseWorker、HSOCKET以及HTIMER 提供C++风格的接口*/
-//#define CPP_FORMAT_API   
 
 #ifdef __WINDOWS__
 #define __STDCALL __stdcall
@@ -59,6 +58,7 @@
 #include <arpa/inet.h>
 #include <mutex>
 #endif // __WINDOWS__
+#include <functional>
 
 #ifdef __WINDOWS__
 #define ATOMIC_LOCK(a)  while (InterlockedExchange8(&a, 1)){Sleep(0);}
@@ -122,7 +122,7 @@ extern "C"
 	Reactor_API void	__STDCALL	HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port);
 
 	Reactor_API	HTIMER	__STDCALL	TimerCreate(BaseWorker* worker, void* user_data, int duetime, int looptime, Timer_Callback callback);
-	Reactor_API void 	__STDCALL	TimerDelete(HTIMER hsock);
+	Reactor_API void 	__STDCALL	TimerDelete(HTIMER timer);
 	Reactor_API void	__STDCALL	PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback);
 	Reactor_API void	__STDCALL	PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback);
 
@@ -181,21 +181,6 @@ typedef struct Socket_Content {
 	BaseWorker*		worker;
 	void*			sock_data;
 	void*			user_data;
-
-#ifdef CPP_FORMAT_API
-	/*以下是C++风格的接口封装,有没有都不重要*/
-
-	bool	send(const char* data, int len) { return HsocketSend(this, data, len); }
-	bool	sendto(const char* ip, int port, const char* data, int len) { return HsocketSendTo(this, ip, port, data, len); }
-	void	close() { HsocketClose(this); }
-	void	closed() { HsocketClosed(this); }
-	void	pop_buf(int len) { HsocketPopBuf(this, len); }
-	void	set_peer_addr(const char* ip, int port) { HsocketPeerAddrSet(this, ip, port); }
-	void	get_peer_addr(char* ip, size_t ipsz, int* port) { HsocketPeerAddr(this, ip, ipsz, port); }
-	void	get_local_addr(char* ip, size_t ipsz, int* port) { HsocketLocalAddr(this, ip, ipsz, port); }
-	void	unbind(BaseWorker* worker, void* user_data, Unbind_Callback ucall, Rebind_Callback rcall) { HsocketUnbindWorker(this, worker, user_data, ucall, rcall); }
-	void	rebind(BaseWorker* worker, void* user_data, Rebind_Callback call) { HsocketRebindWorker(this, worker, user_data, call); }
-#endif
 }*HSOCKET;
 #define SOCKET_CTX_SIZE sizeof(Socket_Content)
 
@@ -204,32 +189,26 @@ typedef struct Timer_Content {
 	char			once;
 	char			closed;
 	char			lock;
-	BaseWorker*		worker;
-	Timer_Callback	call;
 	HANDLE			timer;
 	HANDLE			completion_port;
+	Timer_Callback	call;
+	BaseWorker*		worker;
 	void*			user_data;
-
-#ifdef CPP_FORMAT_API
-	/*以下是C++风格的接口封装,有没有都不重要*/
-
-	void	close() { TimerDelete(this); }
-#endif
 }*HTIMER;
 #define TIMER_CTX_SIZE sizeof(Timer_Content)
 
 typedef struct Event_Content {
 	PROTOCOL		protocol;
-	BaseWorker*		worker;
 	Event_Callback	call;
+	BaseWorker*		worker;
 	void*			event_data;
 }*HEVENT;
 #define EVENT_CTX_SIZE sizeof(Event_Content)
 
 typedef struct Signal_Content {
 	PROTOCOL			protocol;
-	BaseWorker*			worker;
 	Signal_Callback		call;
+	BaseWorker*			worker;
 	long long			signal;
 }*HSIGNAL;
 #define SIGNAL_CTX_SIZE sizeof(Signal_Content)
@@ -261,21 +240,6 @@ typedef struct Socket_Content {
 	BaseWorker*		worker;
 	void*			sock_data;
 	void*			user_data;
-
-#ifdef CPP_FORMAT_API
-	/*以下是C++风格的接口封装,有没有都不重要*/
-
-	bool	send(const char* data, int len) { return HsocketSend(this, data, len); }
-	bool	sendto(const char* ip, int port, const char* data, int len) { return HsocketSendTo(this, ip, port, data, len); }
-	void	close() { HsocketClose(this); }
-	void	closed() { HsocketClosed(this); }
-	void	pop_buf(int len) { HsocketPopBuf(this, len); }
-	void	set_peer_addr(const char* ip, int port) { HsocketPeerAddrSet(this, ip, port); }
-	void	get_peer_addr(char* ip, size_t ipsz, int* port) { HsocketPeerAddr(this, ip, ipsz, port); }
-	void	get_local_addr(char* ip, size_t ipsz, int* port) { HsocketLocalAddr(this, ip, ipsz, port); }
-	void	unbind(BaseWorker* worker, void* user_data, Unbind_Callback ucall, Rebind_Callback rcall) { HsocketUnbindWorker(this, worker, user_data, ucall, rcall); }
-	void	rebind(BaseWorker* worker, void* user_data, Rebind_Callback call) { HsocketRebindWorker(this, worker, user_data, call); }
-#endif
 }*HSOCKET;
 #define SOCKET_CTX_SIZE sizeof(Socket_Content)
 
@@ -285,23 +249,17 @@ typedef struct Timer_Content{
 	char			once;
 	int				fd;
 	int				epoll_fd;
-	BaseWorker*		worker;
 	Timer_Callback	call;
+	BaseWorker*		worker;
 	void*			user_data;
-
-#ifdef CPP_FORMAT_API
-	/*以下是C++风格的接口封装,有没有都不重要*/
-
-	void	close() { TimerDelete(this); }
-#endif
 }TIMER_CTX, *HTIMER;
 
 typedef struct Event_Content{
 	PROTOCOL		protocol;
 	int				fd;
 	int 			epoll_fd;
-	BaseWorker*		worker;
 	Event_Callback	call;
+	BaseWorker*		worker;
 	void*			event_data;
 }EVEVT_CTX, *HEVENT;
 
@@ -309,11 +267,31 @@ typedef struct Signal_Content{
 	PROTOCOL		protocol;
 	int				fd;
 	int 			epoll_fd;
-	BaseWorker*		worker;
 	Signal_Callback	call;
+	BaseWorker*		worker;
 	long long		signal;
 }SIGNAL_CTX, *HSIGNAL;
 #endif // __WINDOWS__
+
+class Timer {
+private:
+	static void timer_call_back(HTIMER timer, BaseWorker* worker, void* user_data) {
+		(*(std::function<void()>*)user_data)();
+	}
+public:
+	HTIMER timer_handle;
+	bool create(BaseWorker* worker, int duetime, int looptime, std::function<void()> func) {
+		std::function<void()>* ptr = new std::function<void()>(func);
+		timer_handle = TimerCreate(worker, ptr, duetime, looptime, timer_call_back);
+		return timer_handle;
+	}
+	void close() {
+		std::function<void()>* ptr = (std::function<void()>*)timer_handle->user_data;
+		delete ptr;
+		TimerDelete(timer_handle);
+		timer_handle = NULL;
+	}
+};
 
 /*
 	BaseWorker：可以处理一个或多个连接的网络事件，多个相关的连接绑定到同一个BaseWorker实现上下文的线程安全，这是此网络库的重要特性
@@ -347,15 +325,6 @@ public:
 	/*解绑网络库工作线程id，如果不再占用网络线程*/
 	void	thread_unset() { ThreadUnDistribution(this); }
 
-#ifdef CPP_FORMAT_API
-	/*以下是C++风格的接口封装,有没有都不重要*/
-
-	HSOCKET	connect(const char* ip, int port, PROTOCOL protocol) { return HsocketConnect(this, ip, port, protocol); }
-	HSOCKET udp_listen(const char* ip, int port) { return HsocketListenUDP(this, ip, port); }
-	HTIMER	timer(void* user_data, int duetime, int looptime, Timer_Callback func) { return TimerCreate(this, user_data, duetime, looptime, func); }
-	void	event(void* user_data, Event_Callback func) { PostEvent(this, user_data, func); }
-	void	signal(long long signal, Signal_Callback func) { PostSignal(this, signal, func); }
-#endif
 
 	/*以下是处理套接字网络事件的虚函数,子类中必须有对应的实现*/
 

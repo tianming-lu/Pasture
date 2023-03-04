@@ -38,21 +38,20 @@ echoServer.cpp    回显服务
 class EchoClient : public BaseWorker		//继承BaseWorker
 {
 	HSOCKET sock = NULL;
-	HTIMER timer = NULL;
+	Timer timer;
 	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {
 		printf("client 连接成功\n");
 		sock = hsock;
 		/* 创建一个定时器，定时发送 hello world */
-		timer = TimerCreate(this, NULL, 5000, 3000, [](HTIMER timer, BaseWorker* proto, void* data) {
-			EchoClient* client = (EchoClient*)proto;
-			HsocketSend(client->sock, "hello world", 11);
+		timer.create(this, 5000, 3000, [this]() {
 			printf("cient 发送: [hello world]\n");
+			HsocketSend(this->sock, "hello world", 11);
+			
 		});
 	};
 	void ConnectionFailed(HSOCKET hsock, int err) {};
 	void ConnectionClosed(HSOCKET hsock, int err) {
-		TimerDelete(timer);
-		timer = NULL;
+		timer.close();
 		sock = NULL;
 	};
 	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
@@ -89,7 +88,8 @@ int main(){
 	printf("正在监听%d端口……\n", listen_port);
 
 	printf("创建EchoClient,并连接127.0.0.1:8000\n");
-	EchoClient* client = new EchoClient();
+	EchoClient* client = new EchoClient;
+	client->auto_free(false);	//禁止actor释放对象
 	HsocketConnect(client, "127.0.0.1", listen_port, TCP_PROTOCOL);
 
 	TimeSleep(10);

@@ -26,16 +26,15 @@
 
 class EchoClient : public BaseWorker		//继承BaseWorker
 {
-	HSOCKET sock = NULL;
+public:
+	Socket sock;
 	Timer timer;
 	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {
 		printf("client 连接成功\n");
-		sock = hsock;
 		/* 创建一个定时器，定时发送 hello world */
 		timer.create(this, 5000, 3000, [this]() {
 			printf("cient 发送: [hello world]\n");
-			HsocketSend(this->sock, "hello world", 11);
-			
+			this->sock.send("hello world", 11);
 		});
 	};
 	void ConnectionFailed(HSOCKET hsock, int err) {};
@@ -45,21 +44,31 @@ class EchoClient : public BaseWorker		//继承BaseWorker
 	};
 	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
 		printf("client 接收: [%.*s]\n\n", len, data);
-		HsocketPopBuf(hsock, len);
+		sock.popbuf(len);
 	};
 };
 
 class EchoServer: public BaseWorker		//继承BaseWorker
 {
-	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {};
+public:
+	Socket sock;
+	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {
+		sock = hsock;
+	};
 	void ConnectionFailed(HSOCKET hsock, int err) {};
 	void ConnectionClosed(HSOCKET hsock, int err) {};
 	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
 		printf("server 接收: [%.*s]\n", len, data);
-		HsocketSend(hsock, data, len); 
-		HsocketPopBuf(hsock, len);
-		//HsocketClose(hsock);   //从容关闭，等待关闭通知
-		//HsocketClosed(hsock);  //立即关闭，无通知
+		sock.send(data, len);
+		sock.popbuf(len);
+		//sock.close();	//从容关闭，后续触发ConnectionClosed事件
+		//sock.closed();	//立即关闭，不触发事件
+
+		/*以下是等效C风格接口*/
+		//HsocketSend(hsock, data, len);
+		//HsocketPopBuf(hsock, len);
+		//HsocketClose(hsock);   
+		//HsocketClosed(hsock);  
 	};
 };
 
@@ -79,7 +88,7 @@ int main(){
 	printf("创建EchoClient,并连接127.0.0.1:8000\n");
 	EchoClient* client = new EchoClient;
 	client->auto_free(false);	//禁止actor释放对象
-	HsocketConnect(client, "127.0.0.1", listen_port, TCP_PROTOCOL);
+	client->sock.connect(client, "127.0.0.1", listen_port, TCP_PROTOCOL);
 
 	TimeSleep(10);
 	printf("factory 优雅关闭\n");

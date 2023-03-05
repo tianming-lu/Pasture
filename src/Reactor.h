@@ -276,8 +276,7 @@ typedef struct Signal_Content{
 }SIGNAL_CTX, *HSIGNAL;
 #endif // __WINDOWS__
 
-
-/*这个是个对 HTIMER 的class封装，给套接字操作提供面向对象的操作方式*/
+/*这个是个对 HTIMER 的class封装，给定时器操作提供面向对象的操作方式，可以使用lambda表达式*/
 class Timer {
 private:
 	HTIMER timer_handle;
@@ -286,16 +285,19 @@ private:
 	}
 public:
 	Timer() { timer_handle = NULL; }
+	~Timer() { close(); }
 	bool create(BaseWorker* worker, int duetime, int looptime, std::function<void()> func) {
 		std::function<void()>* ptr = new std::function<void()>(func);
 		timer_handle = TimerCreate(worker, ptr, duetime, looptime, timer_call_back);
 		return timer_handle;
 	}
 	void close() {
-		std::function<void()>* ptr = (std::function<void()>*)timer_handle->user_data;
-		delete ptr;
-		TimerDelete(timer_handle);
-		timer_handle = NULL;
+		if (timer_handle) {
+			std::function<void()>* ptr = (std::function<void()>*)timer_handle->user_data;
+			delete ptr;
+			TimerDelete(timer_handle);
+			timer_handle = NULL;
+		}
 	}
 };
 
@@ -305,25 +307,25 @@ class Socket {
 private:
 	HSOCKET hsock_ptr;
 public:
-	void operator=(const HSOCKET hsock) { hsock_ptr = hsock; };
-	void operator=(const Socket&conn) { hsock_ptr = conn.hsock_ptr; };
-	bool operator==(const HSOCKET hsock){ return this->hsock_ptr == hsock; };
-	bool operator==(const Socket& conn){ return this->hsock_ptr == conn.hsock_ptr; }
+	void operator=(const HSOCKET hsock) { hsock_ptr = hsock; }
+	void operator=(const Socket& conn) { hsock_ptr = conn.hsock_ptr; }
+	bool operator==(const HSOCKET hsock) const { return hsock_ptr == hsock; }
+	bool operator==(const Socket& conn) const { return hsock_ptr == conn.hsock_ptr; }
 	Socket() { hsock_ptr = NULL; }
-	Socket(HSOCKET hsock) { hsock_ptr = hsock; };
+	Socket(HSOCKET hsock) { hsock_ptr = hsock; }
 	bool	connect(BaseWorker* worker, const char* ip, int port, PROTOCOL protocol) { hsock_ptr = HsocketConnect(worker, ip, port, protocol); return hsock_ptr;}
-	bool	udplisten(BaseWorker* worker, const char* ip, int port){ hsock_ptr = HsocketListenUDP(worker, ip, port); return hsock_ptr;}
-	bool	send(const char* data, int len) {return HsocketSend(hsock_ptr, data, len);}
-	bool	sendto(const char* ip, int port, const char* data, int len) { return HsocketSendTo(hsock_ptr, ip, port, data, len); }
+	bool	udplisten(BaseWorker* worker, const char* ip, int port) { hsock_ptr = HsocketListenUDP(worker, ip, port); return hsock_ptr;}
+	bool	send(const char* data, int len) const {return HsocketSend(hsock_ptr, data, len);}
+	bool	sendto(const char* ip, int port, const char* data, int len) const { return HsocketSendTo(hsock_ptr, ip, port, data, len); }
 	void	close() { HsocketClose(hsock_ptr); hsock_ptr = NULL;}
-	void	closed() {HsocketClosed(hsock_ptr); hsock_ptr = NULL;}
-	int		popbuf(int len) { return HsocketPopBuf(hsock_ptr, len); }
+	void	closed() {HsocketClosed(hsock_ptr); hsock_ptr = NULL; }
+	int		popbuf(int len) const { return HsocketPopBuf(hsock_ptr, len); }
 
-	void	set_peer_addr(const char* ip, int port) { HsocketPeerAddrSet(hsock_ptr, ip, port); }
-	void	get_peer_addr(char* ip, size_t ipsz, int* port) { HsocketPeerAddr(hsock_ptr, ip, ipsz, port); }
-	void	get_local_addr(char* ip, size_t ipsz, int* port) { HsocketLocalAddr(hsock_ptr, ip, ipsz, port); }
-	void	unbind_worker(void* user_data, Unbind_Callback ucall) { HsocketUnbindWorker(hsock_ptr, user_data, ucall); }
-	void	rebind_worker(BaseWorker* worker, void* user_data, Rebind_Callback call) { HsocketRebindWorker(hsock_ptr, worker, user_data, call); }
+	void	set_peer_addr(const char* ip, int port) const { HsocketPeerAddrSet(hsock_ptr, ip, port); }
+	void	get_peer_addr(char* ip, size_t ipsz, int* port) const { HsocketPeerAddr(hsock_ptr, ip, ipsz, port); }
+	void	get_local_addr(char* ip, size_t ipsz, int* port) const { HsocketLocalAddr(hsock_ptr, ip, ipsz, port); }
+	void	unbind_worker(void* user_data, Unbind_Callback ucall) const { HsocketUnbindWorker(hsock_ptr, user_data, ucall); }
+	void	rebind_worker(BaseWorker* worker, void* user_data, Rebind_Callback call) const { HsocketRebindWorker(hsock_ptr, worker, user_data, call); }
 };
 #endif
 
@@ -334,11 +336,16 @@ public:
 	socket_count：记录绑定到BaseWorker的连接数量
 */
 class BaseWorker{
+private:
+	static void event_call_back(BaseWorker* worker, void* user_data) {
+		std::function<void()>* ptr = (std::function<void()>*)user_data;
+		(*ptr)();
+		delete ptr;
+	}
 public:
 	bool	auto_free_flag = true;
 	short	thread_id = -1;
 	int		socket_count = 0;
-
 
 	BaseWorker() { 
 	};
@@ -358,6 +365,11 @@ public:
 	void	thread_set(int index) { ThreadDistributionIndex(this, index); }
 	/*解绑网络库工作线程id，如果不再占用网络线程*/
 	void	thread_unset() { ThreadUnDistribution(this); }
+	/*向worker的工作线程指定一项任务*/
+	void	task(std::function<void()> func) {
+		std::function<void()>* ptr = new std::function<void()>(func);
+		PostEvent(this, ptr, event_call_back);
+	}
 
 	/*以下是处理套接字网络事件的虚函数,子类中必须有对应的实现*/
 

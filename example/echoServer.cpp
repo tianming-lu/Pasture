@@ -29,20 +29,20 @@ class EchoClient : public BaseWorker		//继承BaseWorker
 public:
 	Socket sock;
 	Timer timer;
-	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {
+	void ConnectionMade(Socket sock, PROTOCOL protocol) {
 		printf("client 连接成功\n");
 		/* 创建一个定时器，定时发送 hello world */
-		timer.create(this, 5000, 3000, [this]() {
+		timer.create(this, 5000, 3000, [&sock]() {
 			printf("cient 发送: [hello world]\n");
-			this->sock.send("hello world", 11);
+			sock.send("hello world", 11);
 		});
 	};
-	void ConnectionFailed(HSOCKET hsock, int err) {};
-	void ConnectionClosed(HSOCKET hsock, int err) {
+	void ConnectionFailed(Socket sock, int err) {};
+	void ConnectionClosed(Socket sock, int err) {
 		timer.close();
 		sock = NULL;
 	};
-	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
+	void ConnectionRecved(Socket sock, const char* data, int len) {
 		printf("client 接收: [%.*s]\n\n", len, data);
 		sock.popbuf(len);
 	};
@@ -51,24 +51,16 @@ public:
 class EchoServer: public BaseWorker		//继承BaseWorker
 {
 public:
-	Socket sock;
-	void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) {
-		sock = hsock;
-	};
-	void ConnectionFailed(HSOCKET hsock, int err) {};
-	void ConnectionClosed(HSOCKET hsock, int err) {};
-	void ConnectionRecved(HSOCKET hsock, const char* data, int len) {
+	Socket server_sock;
+	void ConnectionMade(Socket sock, PROTOCOL protocol) {};
+	void ConnectionFailed(Socket sock, int err) {};
+	void ConnectionClosed(Socket sock, int err) {};
+	void ConnectionRecved(Socket sock, const char* data, int len) {
 		printf("server 接收: [%.*s]\n", len, data);
 		sock.send(data, len);
 		sock.popbuf(len);
 		//sock.close();	//从容关闭，后续触发ConnectionClosed事件
 		//sock.closed();	//立即关闭，不触发事件
-
-		/*以下是等效C风格接口*/
-		//HsocketSend(hsock, data, len);
-		//HsocketPopBuf(hsock, len);
-		//HsocketClose(hsock);   
-		//HsocketClosed(hsock);  
 	};
 };
 

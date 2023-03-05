@@ -30,6 +30,9 @@
 /*打开此宏定义，支持KCP连接，需要依赖 https://github.com/skywind3000/kcp */
 //#define KCP_SUPPORT
 
+/*HSOCKET 对应套接字进行面向对象封装 */
+#define SOCKET_OOP_FLAG
+
 #ifdef __WINDOWS__
 #define __STDCALL __stdcall
 #define __CDECL__	__cdecl
@@ -296,7 +299,7 @@ public:
 	}
 };
 
-
+#ifdef SOCKET_OOP_FLAG
 /*这个是个对 HSOCKET 的class封装，给套接字操作提供面向对象的操作方式*/
 class Socket {
 private:
@@ -322,6 +325,7 @@ public:
 	void	unbind_worker(void* user_data, Unbind_Callback ucall) { HsocketUnbindWorker(hsock_ptr, user_data, ucall); }
 	void	rebind_worker(BaseWorker* worker, void* user_data, Rebind_Callback call) { HsocketRebindWorker(hsock_ptr, worker, user_data, call); }
 };
+#endif
 
 /*
 	BaseWorker：可以处理一个或多个连接的网络事件，多个相关的连接绑定到同一个BaseWorker实现上下文的线程安全，这是此网络库的重要特性
@@ -357,10 +361,17 @@ public:
 
 	/*以下是处理套接字网络事件的虚函数,子类中必须有对应的实现*/
 
+#ifndef SOCKET_OOP_FLAG
 	virtual void ConnectionMade(HSOCKET hsock, PROTOCOL protocol) = 0;
 	virtual void ConnectionFailed(HSOCKET hsock, int err) = 0;
 	virtual void ConnectionClosed(HSOCKET hsock, int err) = 0;
 	virtual void ConnectionRecved(HSOCKET hsock, const char* data, int len) = 0;
+#else
+	virtual void ConnectionMade(Socket sock, PROTOCOL protocol) = 0;
+	virtual void ConnectionFailed(Socket sock, int err) = 0;
+	virtual void ConnectionClosed(Socket sock, int err) = 0;
+	virtual void ConnectionRecved(Socket sock, const char* data, int len) = 0;
+#endif
 };
 #define BASEPORTOCOL_SIZE sizeof(BaseWorker)
 

@@ -59,7 +59,7 @@ enum SOCKET_STAT:char{
 
 #define THREAD_STATES_AT(x) ThreadStats + x;
 ThreadStat* ThreadDistribution(BaseWorker* worker) {
-	short thread_id = worker->thread_id;
+	char thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
@@ -78,7 +78,7 @@ ThreadStat* ThreadDistribution(BaseWorker* worker) {
 }
 
 ThreadStat* ThreadDistributionIndex(BaseWorker* worker, int index) {
-	short thread_id = worker->thread_id;
+	char thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	if (index > -1 && index <= ActorThreadWorker) {
 		ThreadStat* tsa = THREAD_STATES_AT(index);
@@ -304,7 +304,7 @@ static void socket_set_keepalive(int fd){
 }
 
 static inline void delete_worker(BaseWorker* worker) {
-	if (worker->socket_count == 0 && worker->auto_free_flag) {
+	if (worker->socket_count == 0 && worker->auto_free_flag == FREE_AUTO) {
 		worker->_free();
 	}
 }
@@ -794,6 +794,7 @@ static int do_accept(HSOCKET listenhsock){
 			close(fd);
 			release_hsock(hsock);
 		}
+		if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
 		ThreadStat* ts = ThreadDistribution(worker);
 
         hsock->fd = fd;
@@ -865,43 +866,6 @@ static void read_work_thread(int* efd){
 	}
 }
 
-static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user_data) {
-	if (!ATOMIC_TRYLOCK(AcceptersLock)) { return; }
-	std::map<uint16_t, BaseAccepter*>::iterator iter;
-	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
-		iter->second->TimeOut();
-	}
-	ATOMIC_UNLOCK(AcceptersLock);
-}
-
-static void accepters_timer_run(){
-	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
-	if (hsock == NULL) 
-		return;
-	int tfd = timerfd_create(CLOCK_MONOTONIC, 0);   //创建定时器
-    if(tfd == -1) {
-		free(hsock);
-        return;
-    }
-	hsock->fd = tfd;
-	hsock->protocol = TIMER;
-	hsock->worker = NULL;
-	hsock->call = accepter_timer_callback;
-	hsock->epoll_fd = epoll_listen_fd;
-	hsock->_conn_stat = 0;
-	hsock->once = 0;
-	hsock->user_data = NULL;
-
-    struct itimerspec time_intv; //用来存储时间
-    time_intv.it_value.tv_sec = 0;
-    time_intv.it_value.tv_nsec = 1*1000;
-    time_intv.it_interval.tv_sec = 1;
-    time_intv.it_interval.tv_nsec = 0;
-	timerfd_settime(tfd, 0, &time_intv, NULL);  //启动定时器
-
-	epoll_add_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
-}
-
 static int runEpollServer(){
     int i,rc;
 	pthread_attr_t rattr;
@@ -914,22 +878,23 @@ static int runEpollServer(){
 			return -1;
 		}
 	}
-	accepters_timer_run();
 	return 0;
 }
 
-int ReactorStart(){
-    epoll_listen_fd = epoll_create(64);
-	if(epoll_listen_fd < 0)
-		return -1;
+int ReactorStart(int thread_count){
+	ActorThreadWorker = thread_count > 0? thread_count : get_nprocs_conf();
 
-	ActorThreadWorker = get_nprocs_conf();
 	ThreadStats = (ThreadStat*)malloc((ActorThreadWorker+1) * sizeof(ThreadStat));
 	if (!ThreadStats) return -2;
+
 	ThreadStat* ts;
+	epoll_listen_fd = epoll_create(64);
+	if (epoll_listen_fd < 0)
+		return -1;
 	ts = THREAD_STATES_AT(ActorThreadWorker);
 	ts->epoll_fd = epoll_listen_fd;
 	ts->WorkerCount = 0;
+
 	for (int i = 0; i < ActorThreadWorker; i++) {
 		ts = THREAD_STATES_AT(i);
 		ts->epoll_fd = epoll_create(64);

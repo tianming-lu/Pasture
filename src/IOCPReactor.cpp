@@ -78,7 +78,7 @@ static long ReplaceIoCompletionPort(SOCKET fd, HANDLE CompletionPort, PVOID Comp
 
 #define THREAD_STATES_AT(x) ThreadStats + x;
 ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker) {
-	short thread_id = worker->thread_id;
+	char thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
@@ -96,7 +96,7 @@ ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker) {
 }
 
 ThreadStat* __STDCALL ThreadDistributionIndex(BaseWorker* worker, int index) {
-	short thread_id = worker->thread_id;
+	char thread_id = worker->thread_id;
 	if (thread_id > -1) return THREAD_STATES_AT(thread_id);
 	if (index > -1 && index <= ActorThreadWorker) {
 		ThreadStat* ts = THREAD_STATES_AT(index);
@@ -326,7 +326,7 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 }
 
 static inline void delete_worker(BaseWorker* worker) {
-	if (worker->socket_count == 0 && worker->auto_free_flag) {
+	if (worker->socket_count == 0 && worker->auto_free_flag == FREE_AUTO) {
 		worker->_free();
 	}
 }
@@ -456,6 +456,8 @@ static void do_aceept(HSOCKET IocpSock){
 
 	BaseWorker* worker = accepter->GetWorker();
 	if (worker) {
+		if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
+
 		IocpSock->worker = worker;
 		IocpSock->sock_data = NULL;
 		IocpSock->event_type = ACCEPTED;
@@ -857,30 +859,6 @@ static void timer_queue_callback(HTIMER hsock, BOOLEAN TimerOrWaitFired) {
 	}
 }
 
-static void accepter_timer_callback(HTIMER timer, BaseWorker* worker, void* user_data) {
-	if (!ATOMIC_TRYLOCK(AcceptersLock)) { return; }
-	std::map<uint16_t, BaseAccepter*>::iterator iter;
-	for (iter = Accepters.begin(); iter != Accepters.end(); ++iter) {
-		iter->second->TimeOut();
-	}
-	ATOMIC_UNLOCK(AcceptersLock);
-}
-
-static void accepters_timer_run() {
-#define ACCEPTOR_TIMER_OUT 1000
-	HTIMER hsock = (HTIMER)malloc(sizeof(Timer_Content));
-	if (hsock) {
-		hsock->protocol = TIMER;
-		hsock->once = ACCEPTOR_TIMER_OUT == 0? 1: 0;
-		hsock->worker = NULL;
-		hsock->call = accepter_timer_callback;
-		hsock->completion_port = ListenCompletionPort;
-		hsock->closed = 0;
-		hsock->lock = 0;
-		CreateTimerQueueTimer(&hsock->timer, NULL, (WAITORTIMERCALLBACK)timer_queue_callback, hsock, 1000, ACCEPTOR_TIMER_OUT, 0);
-	}
-}
-
 static int runIOCPServer(){
 	HANDLE ThreadHandle = NULL;
 	ThreadStat* ts;
@@ -892,19 +870,24 @@ static int runIOCPServer(){
 		}
 		CloseHandle(ThreadHandle);
 	}
-	accepters_timer_run();
 	return 0;
 }
 
-int __STDCALL ReactorStart(){
+int __STDCALL ReactorStart(int thread_count){
 	WSADATA wsData;
 	if (0 != WSAStartup(0x0202, &wsData)){
 		return SOCKET_ERROR;
 	}
 
-	SYSTEM_INFO sysInfor;
-	GetSystemInfo(&sysInfor);
-	ActorThreadWorker = sysInfor.dwNumberOfProcessors;
+	if (thread_count > 0) {
+		ActorThreadWorker = thread_count;
+	}
+	else {
+		SYSTEM_INFO sysInfor;
+		GetSystemInfo(&sysInfor);
+		ActorThreadWorker = sysInfor.dwNumberOfProcessors;
+	}
+	
 	ThreadStats = (ThreadStat*)malloc((ActorThreadWorker+1) * sizeof(ThreadStat));
 	if (!ThreadStats) return -2;
 

@@ -31,7 +31,7 @@
 //#define KCP_SUPPORT
 
 /*HSOCKET 对应套接字进行面向对象封装 */
-#define SOCKET_OOP_FLAG
+//#define SOCKET_OOP_FLAG
 
 #ifdef __WINDOWS__
 #define __STDCALL __stdcall
@@ -108,7 +108,7 @@ extern "C"
 	Reactor_API ThreadStat* __STDCALL ThreadDistributionIndex(BaseWorker* worker, int index);
 	Reactor_API void		__STDCALL ThreadUnDistribution(BaseWorker* worker);
 
-	Reactor_API int		__STDCALL	ReactorStart();
+	Reactor_API int		__STDCALL	ReactorStart(int thread_count);
 	Reactor_API int		__STDCALL	AccepterRun(BaseAccepter* accepter);
 	Reactor_API int		__STDCALL	AccepterStop(BaseAccepter* accepter);
 
@@ -276,7 +276,7 @@ typedef struct Signal_Content{
 }SIGNAL_CTX, *HSIGNAL;
 #endif // __WINDOWS__
 
-/*这个是个对 HTIMER 的class封装，给定时器操作提供面向对象的操作方式，可以使用lambda表达式*/
+/*这个是个对 HTIMER 的class封装，给定时器操作提供面向对象的操作方式，可以使用lambda表达式,定时随对象析构而关闭*/
 class Timer {
 private:
 	HTIMER timer_handle;
@@ -302,7 +302,7 @@ public:
 };
 
 #ifdef SOCKET_OOP_FLAG
-/*这个是个对 HSOCKET 的class封装，给套接字操作提供面向对象的操作方式*/
+/*这个是个对 HSOCKET 的class封装，给套接字操作提供面向对象的操作方式,有点脱裤子放屁得感觉，用户仍然需要小心管理连接关闭以防止野指针*/
 class Socket {
 private:
 	HSOCKET hsock_ptr;
@@ -329,12 +329,10 @@ public:
 };
 #endif
 
-/*
-	BaseWorker：可以处理一个或多个连接的网络事件，多个相关的连接绑定到同一个BaseWorker实现上下文的线程安全，这是此网络库的重要特性
-	auto_free_flag：默认为true，即类实例创建网络连接后，当socket_count等于0，reactor将自动调用_free()函数以释放其资源
-	thread_id：工作线程id,未分配为-1，有效值为 0 到 ActorThreadWorker-1
-	socket_count：记录绑定到BaseWorker的连接数量
-*/
+#define FREE_DEF  0
+#define FREE_AUTO 1
+#define FREE_USER 2
+/*BaseWorker：可以处理一个或多个连接的网络事件，多个相关的连接绑定到同一个BaseWorker实现上下文的线程安全，这是此网络库的重要特性*/
 class BaseWorker{
 private:
 	static void event_call_back(BaseWorker* worker, void* user_data) {
@@ -343,8 +341,8 @@ private:
 		delete ptr;
 	}
 public:
-	bool	auto_free_flag = true;
-	short	thread_id = -1;
+	char	auto_free_flag = FREE_DEF;
+	char	thread_id = -1;
 	int		socket_count = 0;
 
 	BaseWorker() { 
@@ -356,7 +354,7 @@ public:
 	/*释放资源，即使是子类也能安全释放*/
 	virtual void _free() { delete this; };
 	/*是否由网络库自动释放*/
-	void	auto_free(bool flag) { auto_free_flag = flag; }
+	void	auto_free(bool flag) { auto_free_flag = flag ? FREE_AUTO : FREE_USER; }
 	/*获取网络库工作线程id*/
 	int		thread_get() { return thread_id; }
 	/*分配网络库工作线程id，由内部负载均衡指定*/
@@ -413,7 +411,6 @@ public:
 	void stop() { AccepterStop(this); };
 
 	virtual bool	Init() = 0;
-	virtual void	TimeOut() = 0;
 	virtual BaseWorker*	GetWorker() = 0;
 };
 #define BASEACCEPTER_SIZE sizeof(BaseAccepter)
@@ -425,7 +422,6 @@ public:
 	Factory() {};
 	~Factory() {};
 	bool	Init() { return true; };
-	void	TimeOut() {};
 	BaseWorker* GetWorker() { return new WORKER; };
 };
 

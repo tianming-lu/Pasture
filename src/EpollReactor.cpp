@@ -304,7 +304,7 @@ static void socket_set_keepalive(int fd){
 }
 
 static inline void delete_worker(BaseWorker* worker) {
-	if (worker->socket_count == 0 && worker->auto_free_flag == FREE_AUTO) {
+	if (worker->ref_count == 0 && worker->auto_free_flag == FREE_AUTO) {
 		worker->_free();
 	}
 }
@@ -317,9 +317,9 @@ static void do_close(HSOCKET hsock){
 	else if(hsock->_conn_stat == SOCKET_UNBIND){
 		epoll_del_read(hsock->fd, hsock->epoll_fd);
 		BaseWorker* old = hsock->worker;
-		old->socket_count--;
+		old->ref_count--;
 		hsock->worker = NULL;
-		Unbind_Callback call = hsock->unbind_call;
+		WorkerBind_Callback call = hsock->bind_call;
 		call(hsock, old, hsock->call_data);
 
 		delete_worker(old);
@@ -328,7 +328,7 @@ static void do_close(HSOCKET hsock){
 	else if (hsock->_conn_stat == SOCKET_REBIND) {
 		epoll_del_read(hsock->fd, hsock->epoll_fd);
 		BaseWorker* old = hsock->worker;
-		old->socket_count--;
+		old->ref_count--;
 
 		BaseWorker* worker = hsock->rebind_worker;
 		hsock->worker = worker;
@@ -345,7 +345,7 @@ static void do_close(HSOCKET hsock){
 		int error = 0;
 		socklen_t errlen = sizeof(error);
 		getsockopt(hsock->fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
-		worker->socket_count--;
+		worker->ref_count--;
 		if (hsock->_conn_stat == SOCKET_CONNECTING)
 			worker->ConnectionFailed(hsock, error);
 		else
@@ -707,7 +707,9 @@ static int do_read(HSOCKET hsock){
 		break;
 #endif
 	case UDP_PROTOCOL:
+#ifdef KCP_SUPPORT
 	case KCP_PROTOCOL:
+#endif
 		ret = do_read_udp(hsock);
 		break;
 	default:
@@ -727,9 +729,9 @@ static int do_read(HSOCKET hsock){
 
 static int do_rebind(HSOCKET hsock){
 	BaseWorker* worker = hsock->worker;
-	worker->socket_count++;
+	worker->ref_count++;
 	hsock->_conn_stat = SOCKET_CONNECTED;
-	Rebind_Callback callback = hsock->rebind_call;
+	WorkerBind_Callback callback = hsock->bind_call;
 	hsock->_flag = 1;
 	callback(hsock, worker, hsock->call_data);
 	hsock->_flag = 0;
@@ -803,7 +805,7 @@ static int do_accept(HSOCKET listenhsock){
 		hsock->_conn_stat = SOCKET_CONNECTING;
 		set_linger_for_fd(fd);
         fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
-		worker->socket_count++;
+		worker->ref_count++;
 		epoll_add_connect(hsock);
 	}
 	return 1;
@@ -1005,7 +1007,7 @@ HSOCKET HsocketListenUDP(BaseWorker* worker, const char* ip, int port){
 		release_hsock(hsock);
 		return NULL;
 	}
-	worker->socket_count++;
+	worker->ref_count++;
 	return hsock;
 }
 
@@ -1050,13 +1052,17 @@ HSOCKET HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL pr
 	bool ret = false;
 	if (protocol == UDP_PROTOCOL)
 		ret =  EpollConnectExUDP(worker, hsock, 0);
-	else if (protocol == TCP_PROTOCOL || protocol == SSL_PROTOCOL)
+	else if (protocol == TCP_PROTOCOL
+#ifdef OPENSSL_SUPPORT
+		|| protocol == SSL_PROTOCOL
+#endif
+		)
 		ret = EpollConnectExTCP(worker, hsock);
 	if (ret == false) {
 		release_hsock(hsock);
 		return NULL;
 	}
-	worker->socket_count++;
+	worker->ref_count++;
 	return hsock;
 }
 
@@ -1261,7 +1267,7 @@ void HsocketClose(HSOCKET hsock){
 
 void HsocketClosed(HSOCKET hsock){
 	if (hsock == NULL) return;
-	hsock->worker->socket_count--;
+	hsock->worker->ref_count--;
 	hsock->_conn_stat = SOCKET_CLOSED;
 	epoll_mod_write(hsock);
 	return;
@@ -1282,7 +1288,11 @@ int HsocketPopBuf(HSOCKET hsock, int len){
 }
 
 void HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port){
-	if (hsock->protocol == UDP_PROTOCOL || hsock->protocol == KCP_PROTOCOL) {
+	if (hsock->protocol == UDP_PROTOCOL
+#ifdef KCP_SUPPORT
+		|| hsock->protocol == KCP_PROTOCOL
+#endif
+		) {
 		hsock->peer_addr.sin6_port = htons(port);
 		char v6ip[40] = { 0x0 };
 		const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
@@ -1313,15 +1323,15 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 	if (port) *port = ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindWorker(HSOCKET hsock, void* user_data, Unbind_Callback ucall) {
-	hsock->unbind_call = ucall;
+void __STDCALL HsocketUnbindWorker(HSOCKET hsock, void* user_data, WorkerBind_Callback call) {
+	hsock->bind_call = call;
 	hsock->call_data = user_data;
 	hsock->_conn_stat = SOCKET_UNBIND;
 }
 
-void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call) {
+void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, WorkerBind_Callback call) {
 	hsock->rebind_worker = worker;
-	hsock->rebind_call = call;
+	hsock->bind_call = call;
 	hsock->call_data = user_data;
 	hsock->_conn_stat = SOCKET_REBIND;
 

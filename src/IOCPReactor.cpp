@@ -326,7 +326,7 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 }
 
 static inline void delete_worker(BaseWorker* worker) {
-	if (worker->socket_count == 0 && worker->auto_free_flag == FREE_AUTO) {
+	if (worker->ref_count == 0 && worker->auto_free_flag == FREE_AUTO) {
 		worker->_free();
 	}
 }
@@ -349,9 +349,9 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
 		if (!ret) {
 			BaseWorker* old = IocpSock->worker;
-			old->socket_count--;
+			old->ref_count--;
 			IocpSock->worker = NULL;
-			Unbind_Callback call = IocpSock->unbind_call;
+			WorkerBind_Callback call = IocpSock->bind_call;
 			call(IocpSock, old, IocpSock->call_data);
 			delete_worker(old);
 		}
@@ -361,7 +361,7 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
 		if (!ret) {
 			BaseWorker* old = IocpSock->worker;
-			old->socket_count--;
+			old->ref_count--;
 
 			BaseWorker* worker = IocpSock->rebind_worker;
 			IocpSock->worker = worker;
@@ -379,7 +379,7 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 
 	if (IocpSock->fd != INVALID_SOCKET){
 		BaseWorker* worker = IocpSock->worker;
-		worker->socket_count--;
+		worker->ref_count--;
 		if (READ == IocpSock->event_type)
 			worker->ConnectionClosed(IocpSock, err);
 		else
@@ -442,7 +442,11 @@ static void PostRecv(HSOCKET IocpSock){
 	if (ResetIocp_Buff(IocpSock) == false){
 		return do_close(IocpSock, IocpSock->event_type, -1);
 	}
-	if (IocpSock->protocol == TCP_PROTOCOL || IocpSock->protocol == SSL_PROTOCOL)
+	if (IocpSock->protocol == TCP_PROTOCOL 
+#ifdef OPENSSL_SUPPORT
+		|| IocpSock->protocol == SSL_PROTOCOL
+#endif
+		)
 		return PostRecvTCP(IocpSock);
 	return PostRecvUDP(IocpSock);
 }
@@ -742,7 +746,7 @@ static void do_connect(HSOCKET IocpSock) {
 
 static void do_accepted(HSOCKET IocpSock){
 	BaseWorker* worker = IocpSock->worker;
-	worker->socket_count++;
+	worker->ref_count++;
 	worker->ConnectionMade(IocpSock, IocpSock->protocol);
 	PostRecv(IocpSock);
 }
@@ -751,8 +755,8 @@ static void do_rebind(HSOCKET IocpSock) {
 	BaseWorker* worker = IocpSock->worker;
 	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
-	worker->socket_count++;
-	Rebind_Callback callback = IocpSock->rebind_call;
+	worker->ref_count++;
+	WorkerBind_Callback callback = IocpSock->bind_call;
 	callback(IocpSock, worker, IocpSock->call_data);
 	PostRecv(IocpSock);
 }
@@ -1075,7 +1079,7 @@ HSOCKET __STDCALL HsocketListenUDP(BaseWorker* worker, const char* ip, int port)
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}
-	worker->socket_count++;
+	worker->ref_count++;
 	return 0;
 }
 
@@ -1129,9 +1133,17 @@ HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, P
 	inet_pton(AF_INET6, dst, &IocpSock->peer_addr.sin6_addr);
 
 	bool ret = false;
-	if (conntype == TCP_PROTOCOL || conntype == SSL_PROTOCOL)
+	if (conntype == TCP_PROTOCOL
+#ifdef OPENSSL_SUPPORT
+		|| conntype == SSL_PROTOCOL
+#endif
+		)
 		ret = IOCPConnectTCP(worker, IocpSock);   //TCP连接
-	else if (conntype == UDP_PROTOCOL || conntype == KCP_PROTOCOL)
+	else if (conntype == UDP_PROTOCOL
+#ifdef KCP_SUPPORT
+		|| conntype == KCP_PROTOCOL
+#endif
+		)
 		ret = IOCPConnectUDP(worker, IocpSock, 0);   //UDP连接
 	else {
 		ReleaseIOCP_Socket(IocpSock);
@@ -1141,7 +1153,7 @@ HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, P
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}
-	worker->socket_count++;
+	worker->ref_count++;
 	return IocpSock;
 }
 
@@ -1180,9 +1192,17 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 	IocpBuff->databuf.len = len;
 
 	bool ret = false;
-	if (IocpSock->protocol == TCP_PROTOCOL || IocpSock->protocol == SSL_PROTOCOL)
+	if (IocpSock->protocol == TCP_PROTOCOL
+#ifdef OPENSSL_SUPPORT
+		|| IocpSock->protocol == SSL_PROTOCOL
+#endif
+		)
 		ret = IOCPPostSendTCPEx(IocpSock, IocpBuff);
-	else if (IocpSock->protocol == UDP_PROTOCOL || IocpSock->protocol == KCP_PROTOCOL)
+	else if (IocpSock->protocol == UDP_PROTOCOL 
+#ifdef KCP_SUPPORT
+		|| IocpSock->protocol == KCP_PROTOCOL
+#endif
+		)
 		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr));
 	if (ret == false){
 		free(IocpBuff->databuf.buf);
@@ -1286,7 +1306,7 @@ void __STDCALL HsocketClosed(HSOCKET hsock) {
 	if (!hsock || hsock->fd == INVALID_SOCKET || hsock->fd == NULL) return;
 	closesocket(hsock->fd);
 	hsock->fd = INVALID_SOCKET;
-	hsock->worker->socket_count--;
+	hsock->worker->ref_count--;
 }
 
 int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
@@ -1321,7 +1341,11 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 }
 
 void __STDCALL HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port) {
-	if (hsock->protocol == UDP_PROTOCOL || hsock->protocol == KCP_PROTOCOL) {
+	if (hsock->protocol == UDP_PROTOCOL 
+#ifdef KCP_SUPPORT
+		|| hsock->protocol == KCP_PROTOCOL
+#endif
+		) {
 		hsock->peer_addr.sin6_port = htons(port);
 		char v6ip[40] = { 0x0 };
 		const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
@@ -1352,15 +1376,15 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 	if (port) *port = ntohs(local.sin6_port);
 }
 
-void __STDCALL HsocketUnbindWorker(HSOCKET hsock, void* user_data, Unbind_Callback ucall) {
-	hsock->unbind_call = ucall;
+void __STDCALL HsocketUnbindWorker(HSOCKET hsock, void* user_data, WorkerBind_Callback ucall) {
+	hsock->bind_call = ucall;
 	hsock->call_data = user_data;
 	hsock->event_type = UNBIND;
 }
 
-void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call) {
+void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, WorkerBind_Callback call) {
 	hsock->rebind_worker = worker;
-	hsock->rebind_call = call;
+	hsock->bind_call = call;
 	hsock->call_data = user_data;
 	hsock->event_type = REBIND;
 

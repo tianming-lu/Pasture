@@ -76,8 +76,12 @@
 enum PROTOCOL:char {
 	TCP_PROTOCOL = 0,
 	UDP_PROTOCOL = 0x01,
+#ifdef OPENSSL_SUPPORT
 	SSL_PROTOCOL = 0x02,
+#endif
+#ifdef KCP_SUPPORT
 	KCP_PROTOCOL = 0x04,
+#endif
 	HTTP_PROTOCOL = 0x06,
 	WEBSOCKET_PROTOCOL = 0x08,
 	TIMER,
@@ -96,8 +100,7 @@ typedef struct Socket_Content* HSOCKET;
 typedef void (*Timer_Callback) (HTIMER, BaseWorker*, void*);
 typedef void (*Event_Callback)(BaseWorker*, void*);
 typedef void (*Signal_Callback)(BaseWorker*, long long);
-typedef void (*Unbind_Callback)(HSOCKET, BaseWorker*, void*);
-typedef void (*Rebind_Callback)(HSOCKET, BaseWorker*, void*);
+typedef void (*WorkerBind_Callback)(HSOCKET, BaseWorker*, void*);
 
 #ifdef __cplusplus
 extern "C"
@@ -129,8 +132,8 @@ extern "C"
 	Reactor_API void	__STDCALL	PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback);
 	Reactor_API void	__STDCALL	PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback);
 
-	Reactor_API void	__STDCALL	HsocketUnbindWorker(HSOCKET hsock, void* usr_data, Unbind_Callback ucall);
-	Reactor_API void	__STDCALL	HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, Rebind_Callback call);
+	Reactor_API void	__STDCALL	HsocketUnbindWorker(HSOCKET hsock, void* usr_data, WorkerBind_Callback ucall);
+	Reactor_API void	__STDCALL	HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, WorkerBind_Callback call);
 	Reactor_API int		__STDCALL	GetHostByName(const char* name, char* buf, size_t size);
 
 #ifdef OPENSSL_SUPPORT
@@ -166,8 +169,7 @@ typedef struct Socket_Content {
 		};
 		struct {
 			BaseWorker*	rebind_worker;
-			Unbind_Callback unbind_call;
-			Rebind_Callback rebind_call;
+			WorkerBind_Callback bind_call;
 			void*			call_data;
 		};
 	};
@@ -226,8 +228,7 @@ typedef struct Socket_Content {
 	struct sockaddr_in6	peer_addr;
 	
 	BaseWorker*	rebind_worker;
-	Unbind_Callback	unbind_call;
-	Rebind_Callback	rebind_call;
+	WorkerBind_Callback	bind_call;
 	void*			call_data;
 
 	char*	recv_buf;
@@ -343,7 +344,7 @@ private:
 public:
 	char	auto_free_flag = FREE_DEF;
 	char	thread_id = -1;
-	int		socket_count = 0;
+	int		ref_count = 0;
 
 	BaseWorker() { 
 	};
@@ -354,7 +355,9 @@ public:
 	/*释放资源，即使是子类也能安全释放*/
 	virtual void _free() { delete this; };
 	/*是否由网络库自动释放*/
-	void	auto_free(bool flag) { auto_free_flag = flag ? FREE_AUTO : FREE_USER; }
+	void	auto_release(bool flag) { auto_free_flag = flag ? FREE_AUTO : FREE_USER; }
+	/*检查对象是否可释放*/
+	void	check_release() {if (!ref_count && auto_free_flag == FREE_AUTO) {_free();}}
 	/*获取网络库工作线程id*/
 	int		thread_get() { return thread_id; }
 	/*分配网络库工作线程id，由内部负载均衡指定*/

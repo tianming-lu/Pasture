@@ -73,20 +73,20 @@
 #define ATOMIC_TRYLOCK(a)	!__sync_fetch_and_or(&a, 1)
 #endif
 
-typedef char PROTOCOL;
+typedef unsigned char PROTOCOL;
 
-#define	TCP_PROTOCOL 0x0
-#define	UDP_PROTOCOL 0x1
+#define	TCP_PROTOCOL 0x00
+#define	UDP_PROTOCOL 0x01
 #ifdef OPENSSL_SUPPORT
-#define	SSL_PROTOCOL 0x2
+#define	SSL_PROTOCOL 0x02
 #endif
 #ifdef KCP_SUPPORT
-#define	KCP_PROTOCOL 0x4
+#define	KCP_PROTOCOL 0x04
 #endif
-#define	TIMER 0x3
-#define	EVENT 0x5
-#define	SIGNAL 0x6
-#define	HTTP_PROTOCOL 0x8
+#define	TIMER 0x03
+#define	EVENT 0x05
+#define	SIGNAL 0x06
+#define	HTTP_PROTOCOL 0x08
 
 extern int ActorThreadWorker;
 

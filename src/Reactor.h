@@ -73,21 +73,20 @@
 #define ATOMIC_TRYLOCK(a)	!__sync_fetch_and_or(&a, 1)
 #endif
 
-enum PROTOCOL:char {
-	TCP_PROTOCOL = 0,
-	UDP_PROTOCOL = 0x01,
+typedef char PROTOCOL;
+
+#define	TCP_PROTOCOL 0x0
+#define	UDP_PROTOCOL 0x1
 #ifdef OPENSSL_SUPPORT
-	SSL_PROTOCOL = 0x02,
+#define	SSL_PROTOCOL 0x2
 #endif
 #ifdef KCP_SUPPORT
-	KCP_PROTOCOL = 0x04,
+#define	KCP_PROTOCOL 0x4
 #endif
-	HTTP_PROTOCOL = 0x06,
-	WEBSOCKET_PROTOCOL = 0x08,
-	TIMER,
-	EVENT,
-	SIGNAL
-};
+#define	TIMER 0x3
+#define	EVENT 0x5
+#define	SIGNAL 0x6
+#define	HTTP_PROTOCOL 0x8
 
 extern int ActorThreadWorker;
 
@@ -175,7 +174,8 @@ typedef struct Socket_Content {
 	};
 	char	event_type;	//投递类型accept, conect, read, write
 
-	PROTOCOL				protocol;
+	PROTOCOL				protocol:3;  //只使用用低3位，其余5位用户可自定义
+	PROTOCOL				user_protocol:5;
 	struct sockaddr_in6		peer_addr;
 
 	char*	recv_buf;
@@ -221,7 +221,8 @@ typedef struct Signal_Content {
 #else
 
 typedef struct Socket_Content {
-	PROTOCOL			protocol;
+	PROTOCOL			protocol : 3;
+	PROTOCOL			user_protocol:5;
 	unsigned char		_conn_stat:7;
 	unsigned char		_flag :1;
 	unsigned char		_send_lock;

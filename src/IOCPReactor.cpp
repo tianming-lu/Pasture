@@ -41,8 +41,6 @@ typedef struct Thread_Content {
 
 static HANDLE ListenCompletionPort = NULL;
 static ThreadStat* ThreadStats;
-static std::map<uint16_t, BaseAccepter*> Accepters;
-static char AcceptersLock;
 
 static LPFN_ACCEPTEX lpfnAcceptEx = NULL;
 static LPFN_CONNECTEX lpfnConnectEx = NULL;
@@ -242,6 +240,13 @@ static inline void socket_set_v6only(SOCKET fd, int v6only) {
 	setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&v6only, sizeof(v6only));
 }
 
+static inline void set_linger_for_fd(SOCKET fd) {
+	struct linger linger;
+	linger.l_onoff = 0;
+	linger.l_linger = 0;
+	setsockopt(fd, SOL_SOCKET, SO_LINGER, (const char*)&linger, sizeof(struct linger));
+}
+
 static inline SOCKET get_listen_sock(const char* ip, int port){
 	SOCKET listenSock = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
 
@@ -310,12 +315,12 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 	}
 	u_long nonblock = 1;
 	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
+	set_linger_for_fd(IocpSock->fd);
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
 	bool rc = lpfnAcceptEx(accepter->Listenfd, IocpSock->fd,
 		IocpSock->databuf.buf, 0,
 		sizeof(struct sockaddr_in6) + 16, sizeof(struct sockaddr_in6) + 16,
 		&IocpSock->databuf.len, &(IocpSock->overlapped));
-
 	if (false == rc){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
 			ReleaseIOCP_Socket(IocpSock);
@@ -442,9 +447,10 @@ static void PostRecv(HSOCKET IocpSock){
 	if (ResetIocp_Buff(IocpSock) == false){
 		return do_close(IocpSock, IocpSock->event_type, -1);
 	}
-	if (IocpSock->protocol == TCP_PROTOCOL 
+	PROTOCOL protocol = IocpSock->protocol;
+	if (protocol == TCP_PROTOCOL 
 #ifdef OPENSSL_SUPPORT
-		|| IocpSock->protocol == SSL_PROTOCOL
+		|| protocol == SSL_PROTOCOL
 #endif
 		)
 		return PostRecvTCP(IocpSock);
@@ -958,16 +964,10 @@ int __STDCALL AccepterRun(BaseAccepter* accepter){
 			return -3;
 		}
 	}
-	ATOMIC_LOCK(AcceptersLock);
-	Accepters.insert(std::make_pair(accepter->ServerPort, accepter));
-	ATOMIC_UNLOCK(AcceptersLock);
 	return 0;
 }
 
 int __STDCALL AccepterStop(BaseAccepter* accepter){
-	ATOMIC_LOCK(AcceptersLock);
-	Accepters.erase(accepter->ServerPort);
-	ATOMIC_UNLOCK(AcceptersLock);
 	if (accepter->Listenfd) {
 		closesocket(accepter->Listenfd);
 		accepter->Listenfd = NULL;
@@ -1040,6 +1040,7 @@ static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, int listen_port
 
 	u_long nonblock = 1;
 	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
+	set_linger_for_fd(IocpSock->fd);
 	if (bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
@@ -1093,6 +1094,7 @@ static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock){
 
 	u_long nonblock = 1;
 	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
+	set_linger_for_fd(IocpSock->fd);
 	if (bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
@@ -1117,13 +1119,13 @@ static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock){
 	return true;
 }
 
-HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL conntype){
+HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL protocol){
 	if (worker == NULL) return NULL;
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL;
 
 	IocpSock->event_type = CONNECT;
-	IocpSock->protocol = conntype > TIMER ? TCP_PROTOCOL: conntype;
+	IocpSock->protocol = protocol;
 	IocpSock->worker = worker;
 	IocpSock->peer_addr.sin6_family = AF_INET6;
 	IocpSock->peer_addr.sin6_port = htons(port);
@@ -1133,15 +1135,15 @@ HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, P
 	inet_pton(AF_INET6, dst, &IocpSock->peer_addr.sin6_addr);
 
 	bool ret = false;
-	if (conntype == TCP_PROTOCOL
+	if (protocol == TCP_PROTOCOL
 #ifdef OPENSSL_SUPPORT
-		|| conntype == SSL_PROTOCOL
+		|| protocol == SSL_PROTOCOL
 #endif
 		)
 		ret = IOCPConnectTCP(worker, IocpSock);   //TCP连接
-	else if (conntype == UDP_PROTOCOL
+	else if (protocol == UDP_PROTOCOL
 #ifdef KCP_SUPPORT
-		|| conntype == KCP_PROTOCOL
+		|| protocol == KCP_PROTOCOL
 #endif
 		)
 		ret = IOCPConnectUDP(worker, IocpSock, 0);   //UDP连接
@@ -1192,15 +1194,16 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 	IocpBuff->databuf.len = len;
 
 	bool ret = false;
-	if (IocpSock->protocol == TCP_PROTOCOL
+	PROTOCOL protocol = IocpSock->protocol;
+	if (protocol == TCP_PROTOCOL
 #ifdef OPENSSL_SUPPORT
-		|| IocpSock->protocol == SSL_PROTOCOL
+		|| protocol == SSL_PROTOCOL
 #endif
 		)
 		ret = IOCPPostSendTCPEx(IocpSock, IocpBuff);
-	else if (IocpSock->protocol == UDP_PROTOCOL 
+	else if (protocol == UDP_PROTOCOL 
 #ifdef KCP_SUPPORT
-		|| IocpSock->protocol == KCP_PROTOCOL
+		|| protocol == KCP_PROTOCOL
 #endif
 		)
 		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr));
@@ -1341,9 +1344,10 @@ int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
 }
 
 void __STDCALL HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port) {
-	if (hsock->protocol == UDP_PROTOCOL 
+	PROTOCOL protocol = hsock->protocol;
+	if (protocol == UDP_PROTOCOL 
 #ifdef KCP_SUPPORT
-		|| hsock->protocol == KCP_PROTOCOL
+		|| protocol == KCP_PROTOCOL
 #endif
 		) {
 		hsock->peer_addr.sin6_port = htons(port);

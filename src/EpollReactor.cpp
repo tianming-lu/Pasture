@@ -42,8 +42,6 @@ typedef struct Thread_Content {
 
 static int epoll_listen_fd = 0;
 static ThreadStat* ThreadStats;
-static char AcceptersLock;
-static  std::map<uint16_t, BaseAccepter*> Accepters;
 
 enum SOCKET_STAT:char{
 	SOCKET_UNKNOWN = 0,
@@ -285,7 +283,7 @@ static inline void epoll_del_read(int fd, int epoll_fd) {
 	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, &ev);
 }
 
-static void set_linger_for_fd(int fd){
+static inline void set_linger_for_fd(int fd){
     struct linger linger;
 	linger.l_onoff = 0;
 	linger.l_linger = 0;
@@ -437,8 +435,9 @@ static int do_ssl_handshak(HSOCKET hsock, struct SSL_Content* ssl_ctx){
 #endif
 
 static int do_connect(HSOCKET hsock){
+	PROTOCOL protocol = hsock->protocol;
 #ifdef OPENSSL_SUPPORT
-	if (hsock->protocol == SSL_PROTOCOL){
+	if (protocol == SSL_PROTOCOL){
 		if (do_ssl_init(hsock, SSL_CLIENT, 0, NULL, NULL, NULL))
 			return 0;
 		return -1;
@@ -448,7 +447,7 @@ static int do_connect(HSOCKET hsock){
 		BaseWorker* worker = hsock->worker;
 		hsock->_conn_stat = SOCKET_CONNECTED;
 		hsock->_flag = 1;
-		worker->ConnectionMade(hsock, hsock->protocol);
+		worker->ConnectionMade(hsock, protocol);
 		hsock->_flag = 0;
 		return 0;
 	}
@@ -533,10 +532,11 @@ static int do_write_ssl(HSOCKET hsock)
 
 static int do_write(HSOCKET hsock)
 {
-	if (hsock->protocol == TCP_PROTOCOL)
+	PROTOCOL protocol = hsock->protocol;
+	if (protocol == TCP_PROTOCOL)
 		return do_write_tcp(hsock);
 #ifdef OPENSSL_SUPPORT
-	else if (hsock->protocol == SSL_PROTOCOL)
+	else if (protocol == SSL_PROTOCOL)
 		return do_write_ssl(hsock);
 #endif
 	else
@@ -655,6 +655,7 @@ static int do_read_udp(HSOCKET hsock){
 	size_t buflen = 0;
 	int addr_len=sizeof(hsock->peer_addr);
 	BaseWorker* worker = hsock->worker;
+	PROTOCOL protocol = hsock->protocol;
 
 	char* buf = NULL;
 	int rlen, ret = 0;
@@ -664,7 +665,7 @@ static int do_read_udp(HSOCKET hsock){
 		rlen = recvfrom(hsock->fd, buf, buflen, MSG_DONTWAIT, (sockaddr*)&(hsock->peer_addr), (socklen_t*)&addr_len);
 		if (rlen > 0){
 			hsock->offset += rlen;
-			if (hsock->protocol == UDP_PROTOCOL){
+			if (protocol == UDP_PROTOCOL){
 				if (hsock->_conn_stat < SOCKET_CLOSED){
 					hsock->_flag = 1;
 					worker->ConnectionRecved(hsock, hsock->recv_buf, hsock->offset);
@@ -672,7 +673,7 @@ static int do_read_udp(HSOCKET hsock){
 				}
 			}
 #ifdef KCP_SUPPORT
-			else if (hsock->protocol == KCP_PROTOCOL){
+			else if (protocol == KCP_PROTOCOL){
 				ret = do_read_kcp(hsock);
 				if (ret) break;
 			}
@@ -795,6 +796,7 @@ static int do_accept(HSOCKET listenhsock){
 		if (!worker) {
 			close(fd);
 			release_hsock(hsock);
+			continue;
 		}
 		if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
 		ThreadStat* ts = ThreadDistribution(worker);
@@ -933,16 +935,10 @@ int	AccepterRun(BaseAccepter* accepter){
 		hsock->_conn_stat = SOCKET_ACCEPTING;
 		epoll_add_accept(hsock);
 	}
-	ATOMIC_LOCK(AcceptersLock);
-	Accepters.insert(std::make_pair(accepter->ServerPort, accepter));
-	ATOMIC_UNLOCK(AcceptersLock);
 	return 0;
 }
 
 int AccepterStop(BaseAccepter* accepter){
-	ATOMIC_LOCK(AcceptersLock);
-	Accepters.erase(accepter->ServerPort);
-	ATOMIC_UNLOCK(AcceptersLock);
 	if (accepter->Listenfd > 0) {
 		close(accepter->Listenfd);
 		accepter->Listenfd = 0;
@@ -1050,6 +1046,7 @@ HSOCKET HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL pr
 	hsock->epoll_fd = ts->epoll_fd;
 
 	bool ret = false;
+	protocol = protocol;
 	if (protocol == UDP_PROTOCOL)
 		ret =  EpollConnectExUDP(worker, hsock, 0);
 	else if (protocol == TCP_PROTOCOL
@@ -1288,9 +1285,10 @@ int HsocketPopBuf(HSOCKET hsock, int len){
 }
 
 void HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port){
-	if (hsock->protocol == UDP_PROTOCOL
+	PROTOCOL protocol = hsock->protocol;
+	if (protocol == UDP_PROTOCOL
 #ifdef KCP_SUPPORT
-		|| hsock->protocol == KCP_PROTOCOL
+		|| protocol == KCP_PROTOCOL
 #endif
 		) {
 		hsock->peer_addr.sin6_port = htons(port);

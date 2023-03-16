@@ -336,19 +336,19 @@ static inline void delete_worker(BaseWorker* worker) {
 	}
 }
 
-static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
+static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	switch (sock_io_type){
 	case ACCEPT: {
 		BaseAccepter* accepter = (BaseAccepter*)(IocpSock->sock_data);
 		if (PostAcceptClient(accepter)) accepter->Listening = false;
 		ReleaseIOCP_Socket(IocpSock);
-		return;
+		return 0;
 	}
 	case WRITE: {
 		HSENDBUFF IocpBuff = (HSENDBUFF)IocpSock;
 		if (IocpBuff->databuf.buf != NULL) free(IocpBuff->databuf.buf);
 		free(IocpBuff);
-		return;
+		return 0;
 	}
 	case UNBIND: {
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
@@ -357,10 +357,10 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 			old->ref_count--;
 			IocpSock->worker = NULL;
 			WorkerBind_Callback call = IocpSock->bind_call;
-			call(IocpSock, old, IocpSock->call_data);
+			call(IocpSock, old, IocpSock->call_data, 0);
 			delete_worker(old);
 		}
-		return;
+		return 0;
 	}
 	case REBIND: {
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
@@ -376,7 +376,7 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 
 			delete_worker(old);
 		}
-		return;
+		return 0;
 	}
 	default:
 		break;
@@ -392,6 +392,7 @@ static void do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		delete_worker(worker);
 	}
 	ReleaseIOCP_Socket(IocpSock);
+	return 0;
 }
 
 static bool ResetIocp_Buff(HSOCKET IocpSock){
@@ -420,26 +421,33 @@ static bool ResetIocp_Buff(HSOCKET IocpSock){
 	return true;
 }
 
-static inline void PostRecvUDP(HSOCKET IocpSock){
+static inline int PostRecvUDP(HSOCKET IocpSock){
 	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG,
 		(struct sockaddr*)&IocpSock->peer_addr, &sockaddr_len, &IocpSock->overlapped, NULL)){
 		int err = WSAGetLastError();
 		if (ERROR_IO_PENDING != err){
-			do_close(IocpSock, IocpSock->event_type, err);
+			return do_close(IocpSock, IocpSock->event_type, err);
 		}
 	}
+	return 0;
 }
 
-static inline void PostRecvTCP(HSOCKET IocpSock){
-	if (SOCKET_ERROR == WSARecv(IocpSock->fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG, &IocpSock->overlapped, NULL)){
+static inline int PostRecvTCP(HSOCKET IocpSock){
+	DWORD recv_len = 0;
+	int ret = WSARecv(IocpSock->fd, &IocpSock->databuf, 1, &recv_len, &WSARECV_FLAG, &IocpSock->overlapped, NULL);
+	if (SOCKET_ERROR != ret) {
+		return recv_len;
+	} 
+	else{
 		int err = WSAGetLastError();
 		if (ERROR_IO_PENDING != err){
-			do_close(IocpSock, IocpSock->event_type, err);
+			return do_close(IocpSock, IocpSock->event_type, err);
 		}
 	}
+	return 0;
 }
 
-static void PostRecv(HSOCKET IocpSock){
+static int PostRecv(HSOCKET IocpSock){
 	if (IocpSock->event_type == UNBIND || IocpSock->event_type == REBIND)
 		return do_close(IocpSock, IocpSock->event_type, 0);
 
@@ -457,11 +465,12 @@ static void PostRecv(HSOCKET IocpSock){
 	return PostRecvUDP(IocpSock);
 }
 
-static void do_aceept(HSOCKET IocpSock){
+static int do_accept(HSOCKET IocpSock){
 	BaseAccepter* accepter = (BaseAccepter*)IocpSock->sock_data;
 	
 	//连接成功后刷新套接字属性
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
+	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE| FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 	//hsocket_set_keepalive(IocpSock->fd);
 
 	BaseWorker* worker = accepter->GetWorker();
@@ -483,10 +492,11 @@ static void do_aceept(HSOCKET IocpSock){
 	else {
 		do_close(IocpSock, IocpSock->event_type, -1);
 	}
+	return 0;
 }
 
 #ifdef KCP_SUPPORT
-static void do_read_kcp(HSOCKET IocpSock){
+static int do_read_kcp(HSOCKET IocpSock){
 	Kcp_Content* ctx = (Kcp_Content*)(IocpSock->sock_data);
 	ikcp_input(ctx->kcp, IocpSock->recv_buf, IocpSock->offset);
 	IocpSock->offset = 0;
@@ -518,7 +528,7 @@ static void do_read_kcp(HSOCKET IocpSock){
 		}
 		return do_close(IocpSock, IocpSock->event_type, 0);
 	}
-	PostRecv(IocpSock);
+	return PostRecv(IocpSock);
 }
 #endif
 
@@ -551,7 +561,7 @@ static void ssl_do_write(struct SSL_Content* ssl_ctx, HSOCKET IocpSock) {
 	ssl_ctx->woffset = 0;
 }
 
-static void ssl_do_handshake(struct SSL_Content* ssl_ctx, HSOCKET IocpSock) {
+static int ssl_do_handshake(struct SSL_Content* ssl_ctx, HSOCKET IocpSock) {
 	BIO_write(ssl_ctx->rbio, IocpSock->recv_buf, IocpSock->offset);
 	IocpSock->offset = 0;
 	int r = SSL_do_handshake(ssl_ctx->ssl);
@@ -561,27 +571,23 @@ static void ssl_do_handshake(struct SSL_Content* ssl_ctx, HSOCKET IocpSock) {
 		if (IocpSock->fd != INVALID_SOCKET) {
 			BaseWorker* worker = IocpSock->worker;
 			worker->ConnectionMade(IocpSock, IocpSock->protocol);
-			PostRecv(IocpSock);
-			return;
+			return PostRecv(IocpSock);
 		}
-		do_close(IocpSock, IocpSock->event_type, 0);
-		return;
+		return do_close(IocpSock, IocpSock->event_type, 0);
 	}
 	else {
 		int err_SSL_get_error = SSL_get_error(ssl_ctx->ssl, r);
 		switch (err_SSL_get_error) {
 		case SSL_ERROR_WANT_WRITE:
 		case SSL_ERROR_WANT_READ:
-			PostRecv(IocpSock);
-			return;
+			return PostRecv(IocpSock);
 		default:
-			do_close(IocpSock, IocpSock->event_type, err_SSL_get_error);
-			return;
+			return do_close(IocpSock, IocpSock->event_type, err_SSL_get_error);
 		}
 	}
 }
 
-static void do_read_ssl(HSOCKET IocpSock) {
+static int do_read_ssl(HSOCKET IocpSock) {
 	struct SSL_Content* ssl_ctx = (struct SSL_Content*)IocpSock->sock_data;
 	if (SSL_is_init_finished(ssl_ctx->ssl)) {
 		int ret = BIO_write(ssl_ctx->rbio, IocpSock->recv_buf, IocpSock->offset);
@@ -613,32 +619,30 @@ static void do_read_ssl(HSOCKET IocpSock) {
 			if (IocpSock->fd != INVALID_SOCKET) {
 				BaseWorker* worker = IocpSock->worker;
 				worker->ConnectionRecved(IocpSock, ssl_ctx->rbuf, ssl_ctx->roffset);
-				PostRecv(IocpSock);
-				return;
+				return PostRecv(IocpSock);
 			}
-			do_close(IocpSock, IocpSock->event_type, 0);
+			return do_close(IocpSock, IocpSock->event_type, 0);
 		}
 		else {
-			PostRecv(IocpSock);
+			return PostRecv(IocpSock);
 		}
 	}
 	else {
-		ssl_do_handshake(ssl_ctx, IocpSock);
+		return ssl_do_handshake(ssl_ctx, IocpSock);
 	}
 }
 #endif
 
-static void do_read_tcp_and_udp(HSOCKET IocpSock) {
+static int do_read_tcp_and_udp(HSOCKET IocpSock) {
 	if (IocpSock->fd != INVALID_SOCKET) {
 		BaseWorker* worker = IocpSock->worker;
 		worker->ConnectionRecved(IocpSock, IocpSock->recv_buf, IocpSock->offset);
-		PostRecv(IocpSock);
-		return;
+		return PostRecv(IocpSock);
 	}
-	do_close(IocpSock, IocpSock->event_type, 0);
+	return do_close(IocpSock, IocpSock->event_type, 0);
 }
 
-static void do_read(HSOCKET IocpSock) {
+static int do_read(HSOCKET IocpSock) {
 	switch (IocpSock->protocol) {
 	case TCP_PROTOCOL:
 	case UDP_PROTOCOL:
@@ -654,6 +658,7 @@ static void do_read(HSOCKET IocpSock) {
 	default:
 		break;
 	}
+	return 0;
 }
 
 #ifdef OPENSSL_SUPPORT
@@ -725,16 +730,17 @@ static bool Hsocket_SSL_init(HSOCKET IocpSock, int openssl_type, int verify, con
 	return true;
 }
 
-static void Hsocket_upto_SSL_Client(HSOCKET IocpSock) {
+static int Hsocket_upto_SSL_Client(HSOCKET IocpSock) {
 	if (!Hsocket_SSL_init(IocpSock, SSL_CLIENT, 0, NULL, NULL, NULL))
 		return do_close(IocpSock, IocpSock->event_type, 0);
-	PostRecv(IocpSock);
+	return PostRecv(IocpSock);
 }
 #endif
 
-static void do_connect(HSOCKET IocpSock) {
+static int do_connect(HSOCKET IocpSock) {
 	//hsocket_set_keepalive(IocpSock->fd);
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);  //连接成功后刷新套接字属性
+	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 #ifdef OPENSSL_SUPPORT
 	if (IocpSock->protocol == SSL_PROTOCOL) {
 		return Hsocket_upto_SSL_Client(IocpSock);
@@ -744,27 +750,26 @@ static void do_connect(HSOCKET IocpSock) {
 	if (IocpSock->fd != INVALID_SOCKET) {
 		BaseWorker* worker = IocpSock->worker;
 		worker->ConnectionMade(IocpSock, IocpSock->protocol);
-		PostRecv(IocpSock);
-		return;
+		return PostRecv(IocpSock);
 	}
-	do_close(IocpSock, IocpSock->event_type, 0);
+	return do_close(IocpSock, IocpSock->event_type, 0);
 }
 
-static void do_accepted(HSOCKET IocpSock){
+static int do_accepted(HSOCKET IocpSock){
 	BaseWorker* worker = IocpSock->worker;
 	worker->ref_count++;
 	worker->ConnectionMade(IocpSock, IocpSock->protocol);
-	PostRecv(IocpSock);
+	return PostRecv(IocpSock);
 }
 
-static void do_rebind(HSOCKET IocpSock) {
+static int do_rebind(HSOCKET IocpSock) {
 	BaseWorker* worker = IocpSock->worker;
 	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 	worker->ref_count++;
 	WorkerBind_Callback callback = IocpSock->bind_call;
-	callback(IocpSock, worker, IocpSock->call_data);
-	PostRecv(IocpSock);
+	callback(IocpSock, worker, IocpSock->call_data, 0);
+	return PostRecv(IocpSock);
 }
 
 static void do_signal(HSIGNAL hsock) {
@@ -792,28 +797,33 @@ static void do_timer(HTIMER hsock) {
 }
 
 static void ProcessIO(HSOCKET IocpSock, char sock_io_type, DWORD dwIoSize){
+start:
 	switch (sock_io_type){
 	case READ:
 		IocpSock->offset += dwIoSize;
-		do_read(IocpSock);
+		dwIoSize = do_read(IocpSock);
 		break;
 	case WRITE:
-		do_close(IocpSock, sock_io_type, 0);
+		dwIoSize = do_close(IocpSock, sock_io_type, 0);
 		break;
 	case ACCEPT:
-		do_aceept(IocpSock);
+		dwIoSize = do_accept(IocpSock);
 		break;
 	case ACCEPTED:
-		do_accepted(IocpSock);
+		dwIoSize = do_accepted(IocpSock);
 		break;
 	case CONNECT:
-		do_connect(IocpSock);
+		dwIoSize = do_connect(IocpSock);
 		break;
 	case REBIND:
-		do_rebind(IocpSock);
+		dwIoSize = do_rebind(IocpSock);
 		break;
 	default:
 		break;
+	}
+	if (dwIoSize > 0) {
+		sock_io_type = IocpSock->event_type;
+		goto start;
 	}
 }
 
@@ -849,12 +859,10 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 			err = WSAGetLastError();  //64L,121L,995L
 			if (WAIT_TIMEOUT == err || ERROR_IO_PENDING == err) continue;
 			do_close((HSOCKET)OverLapped, sock_io_type, err);
-			continue;
 		}
 		else if (0 == dwIoSize && (READ == sock_io_type || WRITE == sock_io_type)){
 			err = WSAGetLastError();
 			do_close((HSOCKET)OverLapped, sock_io_type, err);
-			continue;
 		}
 		else{
 			ProcessIO((HSOCKET)OverLapped, sock_io_type, dwIoSize);
@@ -1168,9 +1176,14 @@ static bool IOCPPostSendUDPEx(HSOCKET IocpSock, HSENDBUFF IocpBuff, struct socka
 }
 
 static bool IOCPPostSendTCPEx(HSOCKET IocpSock, HSENDBUFF IocpBuff){
-	if (SOCKET_ERROR == WSASend(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, &IocpBuff->overlapped, NULL)){
-		if (ERROR_IO_PENDING != WSAGetLastError())
-			return false;
+	int send_len = 0;
+	int ret = WSASend(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, &IocpBuff->overlapped, NULL);
+	if (SOCKET_ERROR != ret) {
+		if (IocpBuff->databuf.buf != NULL) free(IocpBuff->databuf.buf);
+		free(IocpBuff);
+	}
+	else if (ERROR_IO_PENDING != WSAGetLastError()){
+		return false;
 	}
 	return true;
 }

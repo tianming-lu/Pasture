@@ -37,9 +37,11 @@ int ActorThreadWorker = 0;
 typedef struct Thread_Content {
 	int	WorkerCount;
 	int	epoll_fd;
+	int pipefd[2];
 }ThreadStat;
 #define THREAD_STAT_SIZE sizeof(ThreadStat)
 
+static int pipe_write_fd = 0;
 static int epoll_listen_fd = 0;
 static ThreadStat* ThreadStats;
 
@@ -318,24 +320,33 @@ static void do_close(HSOCKET hsock){
 		old->ref_count--;
 		hsock->worker = NULL;
 		WorkerBind_Callback call = hsock->bind_call;
-		call(hsock, old, hsock->call_data);
+		call(hsock, old, hsock->call_data, 0);
 
 		delete_worker(old);
 		return;
 	}
 	else if (hsock->_conn_stat == SOCKET_REBIND) {
-		epoll_del_read(hsock->fd, hsock->epoll_fd);
-		BaseWorker* old = hsock->worker;
-		old->ref_count--;
-
 		BaseWorker* worker = hsock->rebind_worker;
-		hsock->worker = worker;
-		ThreadStat* ts = ThreadDistribution(worker);
-		hsock->epoll_fd = ts->epoll_fd;
-		hsock->_conn_stat = SOCKET_REBIND;
-		epoll_add_connect(hsock);
+		if (worker){
+			epoll_del_read(hsock->fd, hsock->epoll_fd);
+			BaseWorker* old = hsock->worker;
+			old->ref_count--;
 
-		delete_worker(old);
+			hsock->worker = worker;
+			ThreadStat* ts = ThreadDistribution(worker);
+			hsock->epoll_fd = ts->epoll_fd;
+			hsock->_conn_stat = SOCKET_REBIND;
+			epoll_add_connect(hsock);
+			delete_worker(old);
+			hsock->rebind_worker = NULL;
+		}
+		else{
+			worker = hsock->worker;
+			WorkerBind_Callback callback = hsock->bind_call;
+			callback(hsock, worker, hsock->call_data, -1);
+			epoll_del_read(hsock->fd, hsock->epoll_fd);
+    		release_hsock(hsock);
+		}
 		return;
 	}
 	else if (hsock->_conn_stat < SOCKET_CLOSED){
@@ -734,7 +745,7 @@ static int do_rebind(HSOCKET hsock){
 	hsock->_conn_stat = SOCKET_CONNECTED;
 	WorkerBind_Callback callback = hsock->bind_call;
 	hsock->_flag = 1;
-	callback(hsock, worker, hsock->call_data);
+	callback(hsock, worker, hsock->call_data, 0);
 	hsock->_flag = 0;
 	return 0;
 }
@@ -754,20 +765,24 @@ static void do_timer(HTIMER hsock){
 	free(hsock);
 }
 
-static void do_event(HEVENT hsock){
-	Event_Callback call = hsock->call;
-	call(hsock->worker, hsock->event_data);
-	epoll_del_read(hsock->fd, hsock->epoll_fd);
-	close(hsock->fd);
-	free(hsock);
-}
-
-static void do_signal(HSIGNAL hsock){
-	Signal_Callback call = hsock->call;
-	call(hsock->worker, hsock->signal);
-	epoll_del_read(hsock->fd, hsock->epoll_fd);
-	close(hsock->fd);
-	free(hsock);
+static void do_pipe(HPIPE pipe){
+	Event_Content event_ctx;
+	int n = 0;
+	while(1){
+		n = read(pipe->fd, &event_ctx, sizeof(Event_Content));
+		if(n > 0){
+			if (event_ctx.protocol == EVENT){
+				Event_Callback call = event_ctx.ecall;
+				call(event_ctx.worker, event_ctx.event_data);
+			}
+			else {
+				Signal_Callback call = event_ctx.scall;
+				call(event_ctx.worker, event_ctx.signal);
+			}
+			continue;
+		}
+		break;
+	}
 }
 
 static int do_accept(HSOCKET listenhsock){
@@ -832,10 +847,7 @@ static void read_work_thread(int* efd){
 					do_timer((HTIMER)hsock);
 					continue;
 				case EVENT:
-					do_event((HEVENT)hsock);
-					continue;
-				case SIGNAL:
-					do_signal((HSIGNAL)hsock);
+					do_pipe((HPIPE)hsock);
 					continue;
 				default:{
 					if (events & (EPOLLERR | EPOLLHUP)){
@@ -891,19 +903,27 @@ int ReactorStart(int thread_count){
 	ThreadStats = (ThreadStat*)malloc((ActorThreadWorker+1) * sizeof(ThreadStat));
 	if (!ThreadStats) return -2;
 
-	ThreadStat* ts;
-	epoll_listen_fd = epoll_create(64);
-	if (epoll_listen_fd < 0)
-		return -1;
-	ts = THREAD_STATES_AT(ActorThreadWorker);
-	ts->epoll_fd = epoll_listen_fd;
-	ts->WorkerCount = 0;
-
-	for (int i = 0; i < ActorThreadWorker; i++) {
+	ThreadStat* ts = NULL;
+	for (int i = 0; i <= ActorThreadWorker; i++) {
 		ts = THREAD_STATES_AT(i);
 		ts->epoll_fd = epoll_create(64);
 		ts->WorkerCount = 0;
+		pipe(ts->pipefd);
+		
+		int piperfd = ts->pipefd[0];
+		Pipe_Content* pipe_ctx = (Pipe_Content*)malloc(sizeof(Pipe_Content));
+		if (!pipe_ctx) return -3;
+		pipe_ctx->protocol = EVENT;
+		pipe_ctx->fd = piperfd;
+		fcntl(piperfd, F_SETFL, fcntl(piperfd, F_GETFL, 0)|O_NONBLOCK);
+
+		struct epoll_event ev;
+		ev.events = EPOLLIN | EPOLLET;
+		ev.data.ptr = pipe_ctx;
+		epoll_ctl(ts->epoll_fd, EPOLL_CTL_ADD, piperfd, &ev);
 	}
+	pipe_write_fd = ts->pipefd[1];
+	epoll_listen_fd = ts->epoll_fd;
 
 #ifdef OPENSSL_SUPPORT
 	SSL_library_init();
@@ -1099,39 +1119,27 @@ void TimerDelete(HTIMER hsock){
 }
 
 void PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback){
-	HEVENT hsock = (HEVENT)malloc(sizeof(Event_Content));
-	if (hsock == NULL) return;
-	int efd = eventfd(1, 0);
-    if(efd == -1) {
-		free(hsock);
-		return;
-    }
-	hsock->fd = efd;
-	hsock->protocol = EVENT;
-	hsock->worker = worker;
-	hsock->call = callback;
-	hsock->event_data = event_data;
+	Event_Content event_ctx;
+	event_ctx.protocol = EVENT;
+	event_ctx.ecall = callback;
+	event_ctx.worker = worker;
+	event_ctx.event_data = event_data;
+	
 	ThreadStat* ts = ThreadDistribution(worker);
-	hsock->epoll_fd = ts ? ts->epoll_fd : epoll_listen_fd;
-	epoll_add_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
+	int pipewfd = ts? ts->pipefd[1] : pipe_write_fd;
+	write(pipewfd, &event_ctx, sizeof(Event_Content));
 }
 
 void PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback){
-	HSIGNAL hsock = (HSIGNAL)malloc(sizeof(Signal_Content));
-	if (hsock == NULL) return;
-	int efd = eventfd(1, 0);
-    if(efd == -1) {
-		free(hsock);
-		return;
-    }
-	hsock->fd = efd;
-	hsock->protocol = SIGNAL;
-	hsock->worker = worker;
-	hsock->call = callback;
-	hsock->signal = signal;
+	Event_Content signal_ctx;
+	signal_ctx.protocol = SIGNAL;
+	signal_ctx.scall = callback;
+	signal_ctx.worker = worker;
+	signal_ctx.signal = signal;
+	
 	ThreadStat* ts = ThreadDistribution(worker);
-	hsock->epoll_fd = ts ? ts->epoll_fd : epoll_listen_fd;
-	epoll_add_timer_event_signal(hsock, hsock->fd, hsock->epoll_fd);
+	int pipewfd = ts? ts->pipefd[1] : pipe_write_fd;
+	write(pipewfd, &signal_ctx, sizeof(Event_Content));
 }
 
 static void HsocketSendUdp(HSOCKET hsock, struct sockaddr* addr, int addrlen, const char* data, short len){

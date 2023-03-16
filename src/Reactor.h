@@ -99,7 +99,7 @@ typedef struct Socket_Content* HSOCKET;
 typedef void (*Timer_Callback) (HTIMER, BaseWorker*, void*);
 typedef void (*Event_Callback)(BaseWorker*, void*);
 typedef void (*Signal_Callback)(BaseWorker*, long long);
-typedef void (*WorkerBind_Callback)(HSOCKET, BaseWorker*, void*);
+typedef void (*WorkerBind_Callback)(HSOCKET, BaseWorker*, void*, int);
 
 #ifdef __cplusplus
 extern "C"
@@ -259,23 +259,23 @@ typedef struct Timer_Content{
 	void*			user_data;
 }TIMER_CTX, *HTIMER;
 
+typedef struct Pipe_Content{
+	PROTOCOL protocol;
+	int		 fd;
+}PIPE_CTX, *HPIPE;
+
 typedef struct Event_Content{
 	PROTOCOL		protocol;
-	int				fd;
-	int 			epoll_fd;
-	Event_Callback	call;
+	union{
+		Event_Callback	ecall;
+		Signal_Callback	scall;
+	};
 	BaseWorker*		worker;
-	void*			event_data;
+	union{
+		void*			event_data;
+		long long		signal;
+	};
 }EVEVT_CTX, *HEVENT;
-
-typedef struct Signal_Content{
-	PROTOCOL		protocol;
-	int				fd;
-	int 			epoll_fd;
-	Signal_Callback	call;
-	BaseWorker*		worker;
-	long long		signal;
-}SIGNAL_CTX, *HSIGNAL;
 #endif // __WINDOWS__
 
 /*这个是个对 HTIMER 的class封装，给定时器操作提供面向对象的操作方式，可以使用lambda表达式,定时随对象析构而关闭*/

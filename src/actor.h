@@ -11,8 +11,8 @@
 *	See the Mulan PSL v1 for more details.
 */
 
-#ifndef _REACTOR_H_
-#define _REACTOR_H_
+#ifndef _ACTOR_H_
+#define _ACTOR_H_
 
 #if !defined(__WINDOWS__) && (defined(WIN32) || defined(WIN64) || defined(_MSC_VER) || defined(_WIN32))
 #define __WINDOWS__
@@ -37,14 +37,14 @@
 #define __STDCALL __stdcall
 #define __CDECL__	__cdecl
 #if defined API_EXPORTS
-#define Reactor_API __declspec(dllexport)
+#define Actor_API __declspec(dllexport)
 #else
-#define Reactor_API __declspec(dllimport)
+#define Actor_API __declspec(dllimport)
 #endif
 #else
 #define __STDCALL
 #define __CDECL__
-#define Reactor_API
+#define Actor_API
 #endif // __WINDOWS__
 
 #include <stdio.h>
@@ -106,46 +106,46 @@ extern "C"
 {
 #endif
 
-	Reactor_API	ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker);
-	Reactor_API ThreadStat* __STDCALL ThreadDistributionIndex(BaseWorker* worker, int index);
-	Reactor_API void		__STDCALL ThreadUnDistribution(BaseWorker* worker);
+	Actor_API	ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker);
+	Actor_API	ThreadStat* __STDCALL ThreadDistributionIndex(BaseWorker* worker, int index);
+	Actor_API	void		__STDCALL ThreadUnDistribution(BaseWorker* worker);
 
-	Reactor_API int		__STDCALL	ReactorStart(int thread_count);
-	Reactor_API int		__STDCALL	AccepterRun(BaseAccepter* accepter);
-	Reactor_API int		__STDCALL	AccepterStop(BaseAccepter* accepter);
+	Actor_API int		__STDCALL	ActorStart(int thread_count);
+	Actor_API int		__STDCALL	AccepterRun(BaseAccepter* accepter);
+	Actor_API int		__STDCALL	AccepterStop(BaseAccepter* accepter);
 
-	Reactor_API HSOCKET __STDCALL	HsocketListenUDP(BaseWorker* worker, const char* ip, int port);
-	Reactor_API HSOCKET	__STDCALL	HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL protocol);
-	Reactor_API bool	__STDCALL	HsocketSend(HSOCKET hsock, const char* data, int len);
-	Reactor_API bool	__STDCALL	HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len);
-	Reactor_API void	__STDCALL	HsocketClose(HSOCKET hsock);
-	Reactor_API void 	__STDCALL	HsocketClosed(HSOCKET hsock);
-	Reactor_API int		__STDCALL	HsocketPopBuf(HSOCKET hsock, int len);
+	Actor_API HSOCKET	__STDCALL	HsocketListenUDP(BaseWorker* worker, const char* ip, int port);
+	Actor_API HSOCKET	__STDCALL	HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL protocol);
+	Actor_API bool		__STDCALL	HsocketSend(HSOCKET hsock, const char* data, int len);
+	Actor_API bool		__STDCALL	HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len);
+	Actor_API void		__STDCALL	HsocketClose(HSOCKET hsock);
+	Actor_API void		__STDCALL	HsocketClosed(HSOCKET hsock);
+	Actor_API int		__STDCALL	HsocketPopBuf(HSOCKET hsock, int len);
 
-	Reactor_API void	__STDCALL	HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port);
-	Reactor_API void	__STDCALL	HsocketPeerAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port);
-	Reactor_API void	__STDCALL	HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port);
+	Actor_API void	__STDCALL	HsocketPeerAddrSet(HSOCKET hsock, const char* ip, int port);
+	Actor_API void	__STDCALL	HsocketPeerAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port);
+	Actor_API void	__STDCALL	HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port);
 
-	Reactor_API	HTIMER	__STDCALL	TimerCreate(BaseWorker* worker, void* user_data, int duetime, int looptime, Timer_Callback callback);
-	Reactor_API void 	__STDCALL	TimerDelete(HTIMER timer);
-	Reactor_API void	__STDCALL	PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback);
-	Reactor_API void	__STDCALL	PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback);
+	Actor_API	HTIMER	__STDCALL	TimerCreate(BaseWorker* worker, void* user_data, int duetime, int looptime, Timer_Callback callback);
+	Actor_API	void 	__STDCALL	TimerDelete(HTIMER timer);
+	Actor_API	void	__STDCALL	PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback);
+	Actor_API	void	__STDCALL	PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback);
 
-	Reactor_API void	__STDCALL	HsocketUnbindWorker(HSOCKET hsock, void* usr_data, WorkerBind_Callback ucall);
-	Reactor_API void	__STDCALL	HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, WorkerBind_Callback call);
-	Reactor_API int		__STDCALL	GetHostByName(const char* name, char* buf, size_t size);
+	Actor_API void	__STDCALL	HsocketUnbindWorker(HSOCKET hsock, void* usr_data, WorkerBind_Callback ucall);
+	Actor_API void	__STDCALL	HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, WorkerBind_Callback call);
+	Actor_API int	__STDCALL	GetHostByName(const char* name, char* buf, size_t size);
 
 #ifdef OPENSSL_SUPPORT
-	Reactor_API bool __STDCALL	HsocketSSLCreate(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key);
+	Actor_API bool __STDCALL	HsocketSSLCreate(HSOCKET hsock, int openssl_type, int verify, const char* ca_crt, const char* user_crt, const char* pri_key);
 #endif
 
 #ifdef KCP_SUPPORT
-	Reactor_API int		__STDCALL	HsocketKcpCreate(HSOCKET hsock, int conv, int mode);
-	Reactor_API void	__STDCALL	HsocketKcpNodelay(HSOCKET hsock, int nodelay, int interval, int resend, int nc);
-	Reactor_API void	__STDCALL	HsocketKcpWndsize(HSOCKET hsock, int sndwnd, int rcvwnd);
-	Reactor_API int		__STDCALL	HsocketKcpGetconv(HSOCKET hsock);
-	Reactor_API void	__STDCALL	HsocketKcpUpdate(HSOCKET hsock);
-	Reactor_API int		__STDCALL	HsocketKcpDebug(HSOCKET hsock, char* buf, int size);
+	Actor_API int	__STDCALL	HsocketKcpCreate(HSOCKET hsock, int conv, int mode);
+	Actor_API void	__STDCALL	HsocketKcpNodelay(HSOCKET hsock, int nodelay, int interval, int resend, int nc);
+	Actor_API void	__STDCALL	HsocketKcpWndsize(HSOCKET hsock, int sndwnd, int rcvwnd);
+	Actor_API int	__STDCALL	HsocketKcpGetconv(HSOCKET hsock);
+	Actor_API void	__STDCALL	HsocketKcpUpdate(HSOCKET hsock);
+	Actor_API int	__STDCALL	HsocketKcpDebug(HSOCKET hsock, char* buf, int size);
 #endif
 
 #ifdef __cplusplus
@@ -429,4 +429,4 @@ public:
 	BaseWorker* GetWorker() { return new WORKER; };
 };
 
-#endif // !_REACTOR_H_
+#endif // !_ACTOR_H_

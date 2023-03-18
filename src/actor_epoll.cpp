@@ -11,7 +11,7 @@
 *	See the Mulan PSL v1 for more details.
 */
 
-#include "Reactor.h"
+#include "actor.h"
 #include <sys/epoll.h>
 #include <netinet/tcp.h>
 #include <fcntl.h>
@@ -897,7 +897,7 @@ static int runEpollServer(){
 	return 0;
 }
 
-int ReactorStart(int thread_count){
+int ActorStart(int thread_count){
 	ActorThreadWorker = thread_count > 0? thread_count : get_nprocs_conf();
 
 	ThreadStats = (ThreadStat*)malloc((ActorThreadWorker+1) * sizeof(ThreadStat));

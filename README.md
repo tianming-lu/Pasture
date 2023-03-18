@@ -22,9 +22,9 @@
 #### 源码说明
 
 src为源码目录  
-Reactor.h    头文件  
-IOCPReactor.cpp    Windows IOCP 实现  
-EpollReactor.cpp    linux epoll 实现
+actor.h    头文件  
+actor_iocp.cpp    Windows IOCP 实现  
+actor_epoll.cpp    linux epoll 实现
 
 使用者只需要选择其中一个.cpp文件在相应平台编译即可，头文件中为不同的平台提供相同的api，基于本框架的项目可以快速完成跨平台移植
 

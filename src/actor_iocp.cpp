@@ -11,7 +11,7 @@
 *	See the Mulan PSL v1 for more details.
 */
 
-#include "Reactor.h"
+#include "actor.h"
 #include <Mstcpip.h>
 #include <time.h>
 #include <map>
@@ -266,7 +266,7 @@ static inline SOCKET get_listen_sock(const char* ip, int port){
 		closesocket(listenSock);
 		return SOCKET_ERROR;
 	}
-	listen(listenSock, 5);
+	listen(listenSock, 10);
 	if (listenSock == SOCKET_ERROR){
 		closesocket(listenSock);
 		return SOCKET_ERROR;
@@ -465,6 +465,54 @@ static int PostRecv(HSOCKET IocpSock){
 	return PostRecvUDP(IocpSock);
 }
 
+static void do_accept_go_on(BaseAccepter* accepter) {
+	SOCKET fd, listenfd = accepter->Listenfd;
+	HSOCKET IocpSock;
+	ThreadStat* ts;
+	BaseWorker* worker;
+	struct sockaddr_in6 addr;
+	int len = sizeof(addr);
+
+	while (1) {
+		//fd = WSAAccept(listenfd, (struct sockaddr*)&addr, &len, NULL, NULL);
+		fd = accept(listenfd, (struct sockaddr*)&addr, &len);
+		if (fd == INVALID_SOCKET) break;
+		u_long nonblock = 1;
+		ioctlsocket(fd, FIONBIO, &nonblock);
+		set_linger_for_fd(fd);
+
+		IocpSock = NewIOCP_Socket();
+		worker = accepter->GetWorker();
+		if (!IocpSock || !worker) {
+			closesocket(fd);
+			goto error;
+		}
+		IocpSock->fd = fd;
+		IocpSock->event_type = ACCEPTED;
+		IocpSock->worker = worker;
+		IocpSock->sock_data = accepter;
+		IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
+		if (IocpSock->recv_buf == NULL) {
+			printf("%s:%d memory malloc error\n", __func__, __LINE__);
+			goto error;
+		}
+		IocpSock->size = DATA_BUFSIZE;
+		IocpSock->databuf.buf = IocpSock->recv_buf;
+		IocpSock->databuf.len = DATA_BUFSIZE;
+		memcpy(&IocpSock->peer_addr, &addr, sizeof(addr));
+
+		if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
+		ts = ThreadDistribution(worker);
+		CreateIoCompletionPort((HANDLE)fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
+		SetFileCompletionNotificationModes((HANDLE)fd, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
+		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
+		continue;
+	error:
+		if (IocpSock) ReleaseIOCP_Socket(IocpSock);
+		if (worker) worker->_free();
+	}
+}
+
 static int do_accept(HSOCKET IocpSock){
 	BaseAccepter* accepter = (BaseAccepter*)IocpSock->sock_data;
 	
@@ -487,6 +535,7 @@ static int do_accept(HSOCKET IocpSock){
 
 		CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
+		do_accept_go_on(accepter);
 		if (PostAcceptClient(accepter)) accepter->Listening = false;
 	}
 	else {
@@ -836,38 +885,79 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 	bool bRet = false;
 	char sock_io_type = 0;
 	DWORD err = 0;
-	while (true){
-		bRet = GetQueuedCompletionStatus(CompletionPort, &dwIoSize, (PULONG_PTR)&CompletKey, (LPOVERLAPPED*)&OverLapped, INFINITE);
-		if (!OverLapped) {  //Overlapped为NULL，说明当前消息不是套接字IO完成消息，而是timer、event、signal
-			switch (*(PROTOCOL*)CompletKey)
-			{
-			case TIMER:
-				do_timer((HTIMER)CompletKey);
-				continue;
-			case EVENT:
-				do_event((HEVENT)CompletKey);
-				continue;
-			case SIGNAL:
-				do_signal((HSIGNAL)CompletKey);
-				continue;
-			default:
-				continue;
+	
+	LPOVERLAPPED_ENTRY entry_array, entry;
+	unsigned long i, ret = 0;
+	entry_array = (LPOVERLAPPED_ENTRY)malloc(sizeof(OVERLAPPED_ENTRY) * 1024);
+	if (!entry_array) return -1;
+	while (1) {
+		bRet = GetQueuedCompletionStatusEx(CompletionPort, entry_array, 1024, &ret, INFINITE, false);
+		if (bRet) {
+			for (i = 0; i < ret; i++) {
+				entry = entry_array + i;
+				CompletKey = (void*)entry->lpCompletionKey;
+				OverLapped = entry->lpOverlapped;
+				dwIoSize = entry->dwNumberOfBytesTransferred;
+				if (!OverLapped) {  //Overlapped为NULL，说明当前消息不是套接字IO完成消息，而是timer、event、signal
+					switch (*(PROTOCOL*)CompletKey)
+					{
+					case TIMER:
+						do_timer((HTIMER)CompletKey);
+						continue;
+					case EVENT:
+						do_event((HEVENT)CompletKey);
+						continue;
+					case SIGNAL:
+						do_signal((HSIGNAL)CompletKey);
+						continue;
+					default:
+						continue;
+					}
+				}
+				sock_io_type = ((HSENDBUFF)OverLapped)->event_type;
+				if (0 == dwIoSize && (READ == sock_io_type || WRITE == sock_io_type)) {
+					err = WSAGetLastError();   //GetOverlappedResult(hsock->fd, OverLapped, dwIoSize, );
+					do_close((HSOCKET)OverLapped, sock_io_type, err);
+				}
+				else {
+					ProcessIO((HSOCKET)OverLapped, sock_io_type, dwIoSize);
+				}
 			}
 		}
-		sock_io_type = ((HSENDBUFF)OverLapped)->event_type;
-		if (bRet == false){
-			err = WSAGetLastError();  //64L,121L,995L
-			if (WAIT_TIMEOUT == err || ERROR_IO_PENDING == err) continue;
-			do_close((HSOCKET)OverLapped, sock_io_type, err);
-		}
-		else if (0 == dwIoSize && (READ == sock_io_type || WRITE == sock_io_type)){
-			err = WSAGetLastError();
-			do_close((HSOCKET)OverLapped, sock_io_type, err);
-		}
-		else{
-			ProcessIO((HSOCKET)OverLapped, sock_io_type, dwIoSize);
-		}
 	}
+
+	//while (true){
+	//	bRet = GetQueuedCompletionStatus(CompletionPort, &dwIoSize, (PULONG_PTR)&CompletKey, (LPOVERLAPPED*)&OverLapped, INFINITE);
+	//	if (!OverLapped) {  //Overlapped为NULL，说明当前消息不是套接字IO完成消息，而是timer、event、signal
+	//		switch (*(PROTOCOL*)CompletKey)
+	//		{
+	//		case TIMER:
+	//			do_timer((HTIMER)CompletKey);
+	//			continue;
+	//		case EVENT:
+	//			do_event((HEVENT)CompletKey);
+	//			continue;
+	//		case SIGNAL:
+	//			do_signal((HSIGNAL)CompletKey);
+	//			continue;
+	//		default:
+	//			continue;
+	//		}
+	//	}
+	//	sock_io_type = ((HSENDBUFF)OverLapped)->event_type;
+	//	if (bRet == false){
+	//		err = WSAGetLastError();  //64L,121L,995L
+	//		if (WAIT_TIMEOUT == err || ERROR_IO_PENDING == err) continue;
+	//		do_close((HSOCKET)OverLapped, sock_io_type, err);
+	//	}
+	//	else if (0 == dwIoSize && (READ == sock_io_type || WRITE == sock_io_type)){
+	//		err = WSAGetLastError();
+	//		do_close((HSOCKET)OverLapped, sock_io_type, err);
+	//	}
+	//	else{
+	//		ProcessIO((HSOCKET)OverLapped, sock_io_type, dwIoSize);
+	//	}
+	//}
 	return 0;
 }
 
@@ -891,7 +981,7 @@ static int runIOCPServer(){
 	return 0;
 }
 
-int __STDCALL ReactorStart(int thread_count){
+int __STDCALL ActorStart(int thread_count){
 	WSADATA wsData;
 	if (0 != WSAStartup(0x0202, &wsData)){
 		return SOCKET_ERROR;

@@ -15,23 +15,39 @@
 设计思路：  
 1. 全局仅有一个actor,管理所有的accepter和worker
 2. actor将启动 1个accept线程 和  CPU核数 个worker线程  
-3. accept线程处理tcp监听事件和数据库驱动(待开发功能)  
+3. accept线程处理tcp监听事件 
 4. worker线程处理连接读写和业务逻辑，以及定时器、自定义事件和信号  
 5. accept线程和worker线程拥有相同的逻辑，能处理的事务并不是固定的  
 
+接口简洁：
+
+```C++
+	HSOCKET tcp_sock = HsocketConnect(worker, "127.0.0.1", 1080, TCP_PROTOCOL);
+	HSOCKET udp_sock = HsocketConnect(worker, "127.0.0.1", 1080, UDP_PROTOCOL);
+
+	HsocketSSLCreate(tcp_sock, SSL_SERVER, 0, ca_crt, user_crt, pri_key);
+	HsocketSSLCreate(tcp_sock, SSL_CLIENT, 0, ca_crt, user_crt, pri_key);
+
+	HsocketKcpCreate(udp_sock, conv, 0);
+	HsocketKcpUpdate(udp_sock, hsock);
+
+	HsocketSend(sock, data, len);
+	HsocketClose(sock);
+```
+
 #### 源码说明
 
-src为源码目录  
-actor.h    头文件  
-actor_iocp.cpp    Windows IOCP 实现  
-actor_epoll.cpp    linux epoll 实现
+	src为源码目录  
+	actor.h    			头文件  
+	actor_iocp.cpp    	Windows IOCP 实现  
+	actor_epoll.cpp    	linux epoll 实现
 
-使用者只需要选择其中一个.cpp文件在相应平台编译即可，头文件中为不同的平台提供相同的api，基于本框架的项目可以快速完成跨平台移植
+	example示例代码  
+	echoServer.cpp		回显服务 
 
-#### 快速入门
+	使用者只需要选择其中一个.cpp文件在相应平台编译即可，头文件中为不同的平台提供相同的api，基于本框架的项目可以快速完成跨平台移植
 
-example为示例项目目录  
-echoServer.cpp    回显服务  
+
 
 #### 示例
 ```C++

@@ -23,13 +23,14 @@
 #endif
 
 #define DATA_BUFSIZE 8192
-#define READ	0
-#define WRITE	1
-#define ACCEPT	2
-#define CONNECT 3
-#define ACCEPTED 4
-#define UNBIND 5
-#define REBIND 6
+#define SOCKET_READ		0
+#define SOCKET_WRITE	1
+#define SOCKET_ACCEPT	2
+#define SOCKET_CONNECT	3
+#define SOCKET_ACCEPTED 4
+#define SOCKET_CLOSE	5
+#define SOCKET_UNBIND	6
+#define SOCKET_REBIND	7
 
 int  ActorThreadWorker = 0;
 
@@ -248,8 +249,7 @@ static inline void set_linger_for_fd(SOCKET fd) {
 }
 
 static inline SOCKET get_listen_sock(const char* ip, int port){
-	SOCKET listenSock = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
-
+	SOCKET listenSock = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	struct sockaddr_in6 server_addr = {0x0};
 	server_addr.sin6_family = AF_INET6;
 	server_addr.sin6_port = htons(port);
@@ -295,7 +295,7 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 	if (!IocpSock){
 		return -1;
 	}
-	IocpSock->event_type = ACCEPT;
+	IocpSock->event_type = SOCKET_ACCEPT;
 	IocpSock->worker = NULL;
 	IocpSock->sock_data = accepter;
 	IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
@@ -308,7 +308,7 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 	IocpSock->databuf.buf = IocpSock->recv_buf;
 	IocpSock->databuf.len = DATA_BUFSIZE;
 
-	IocpSock->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+	IocpSock->fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if (IocpSock->fd == INVALID_SOCKET){
 		ReleaseIOCP_Socket(IocpSock);
 		return -3;
@@ -338,19 +338,19 @@ static inline void delete_worker(BaseWorker* worker) {
 
 static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	switch (sock_io_type){
-	case ACCEPT: {
+	case SOCKET_ACCEPT: {
 		BaseAccepter* accepter = (BaseAccepter*)(IocpSock->sock_data);
 		if (PostAcceptClient(accepter)) accepter->Listening = false;
 		ReleaseIOCP_Socket(IocpSock);
 		return 0;
 	}
-	case WRITE: {
+	case SOCKET_WRITE: {
 		HSENDBUFF IocpBuff = (HSENDBUFF)IocpSock;
 		if (IocpBuff->databuf.buf != NULL) free(IocpBuff->databuf.buf);
 		free(IocpBuff);
 		return 0;
 	}
-	case UNBIND: {
+	case SOCKET_UNBIND: {
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
 		if (!ret) {
 			BaseWorker* old = IocpSock->worker;
@@ -362,7 +362,7 @@ static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 		}
 		return 0;
 	}
-	case REBIND: {
+	case SOCKET_REBIND: {
 		long ret = ReplaceIoCompletionPort(IocpSock->fd, NULL, NULL);
 		if (!ret) {
 			BaseWorker* old = IocpSock->worker;
@@ -370,7 +370,7 @@ static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 
 			BaseWorker* worker = IocpSock->rebind_worker;
 			IocpSock->worker = worker;
-			IocpSock->event_type = REBIND;
+			IocpSock->event_type = SOCKET_REBIND;
 			ThreadStat* ts = ThreadDistribution(worker);
 			PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
 
@@ -385,7 +385,7 @@ static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	if (IocpSock->fd != INVALID_SOCKET){
 		BaseWorker* worker = IocpSock->worker;
 		worker->ref_count--;
-		if (READ == IocpSock->event_type)
+		if (SOCKET_READ == IocpSock->event_type)
 			worker->ConnectionClosed(IocpSock, err);
 		else
 			worker->ConnectionFailed(IocpSock, err);
@@ -448,10 +448,10 @@ static inline int PostRecvTCP(HSOCKET IocpSock){
 }
 
 static int PostRecv(HSOCKET IocpSock){
-	if (IocpSock->event_type == UNBIND || IocpSock->event_type == REBIND)
+	if (IocpSock->event_type >= SOCKET_CLOSE)
 		return do_close(IocpSock, IocpSock->event_type, 0);
 
-	IocpSock->event_type = READ;
+	IocpSock->event_type = SOCKET_READ;
 	if (ResetIocp_Buff(IocpSock) == false){
 		return do_close(IocpSock, IocpSock->event_type, -1);
 	}
@@ -488,7 +488,7 @@ static void do_accept_go_on(BaseAccepter* accepter) {
 			goto error;
 		}
 		IocpSock->fd = fd;
-		IocpSock->event_type = ACCEPTED;
+		IocpSock->event_type = SOCKET_ACCEPTED;
 		IocpSock->worker = worker;
 		IocpSock->sock_data = accepter;
 		IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
@@ -516,8 +516,8 @@ static void do_accept_go_on(BaseAccepter* accepter) {
 static int do_accept(HSOCKET IocpSock){
 	BaseAccepter* accepter = (BaseAccepter*)IocpSock->sock_data;
 	
-	//连接成功后刷新套接字属性
-	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
+	/*连接成功后刷新套接字属性, 这个操作耗时严重，且先注释掉，貌似也不会又什么问题*/
+	//setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
 	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE| FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 	//hsocket_set_keepalive(IocpSock->fd);
 
@@ -527,7 +527,7 @@ static int do_accept(HSOCKET IocpSock){
 
 		IocpSock->worker = worker;
 		IocpSock->sock_data = NULL;
-		IocpSock->event_type = ACCEPTED;
+		IocpSock->event_type = SOCKET_ACCEPTED;
 		ThreadStat* ts = ThreadDistribution(worker);
 
 		int nSize = sizeof(IocpSock->peer_addr);
@@ -815,8 +815,10 @@ static int do_rebind(HSOCKET IocpSock) {
 	BaseWorker* worker = IocpSock->worker;
 	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
+	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 	worker->ref_count++;
 	WorkerBind_Callback callback = IocpSock->bind_call;
+	IocpSock->event_type = SOCKET_READ;
 	callback(IocpSock, worker, IocpSock->call_data, 0);
 	return PostRecv(IocpSock);
 }
@@ -848,23 +850,23 @@ static void do_timer(HTIMER hsock) {
 static void ProcessIO(HSOCKET IocpSock, char sock_io_type, DWORD dwIoSize){
 start:
 	switch (sock_io_type){
-	case READ:
+	case SOCKET_READ:
 		IocpSock->offset += dwIoSize;
 		dwIoSize = do_read(IocpSock);
 		break;
-	case WRITE:
+	case SOCKET_WRITE:
 		dwIoSize = do_close(IocpSock, sock_io_type, 0);
 		break;
-	case ACCEPT:
+	case SOCKET_ACCEPT:
 		dwIoSize = do_accept(IocpSock);
 		break;
-	case ACCEPTED:
+	case SOCKET_ACCEPTED:
 		dwIoSize = do_accepted(IocpSock);
 		break;
-	case CONNECT:
+	case SOCKET_CONNECT:
 		dwIoSize = do_connect(IocpSock);
 		break;
-	case REBIND:
+	case SOCKET_REBIND:
 		dwIoSize = do_rebind(IocpSock);
 		break;
 	default:
@@ -915,7 +917,7 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 					}
 				}
 				sock_io_type = ((HSENDBUFF)OverLapped)->event_type;
-				if (0 == dwIoSize && (READ == sock_io_type || WRITE == sock_io_type)) {
+				if (0 == dwIoSize && (SOCKET_READ == sock_io_type || SOCKET_WRITE == sock_io_type)) {
 					err = WSAGetLastError();   //GetOverlappedResult(hsock->fd, OverLapped, dwIoSize, );
 					do_close((HSOCKET)OverLapped, sock_io_type, err);
 				}
@@ -950,7 +952,7 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 	//		if (WAIT_TIMEOUT == err || ERROR_IO_PENDING == err) continue;
 	//		do_close((HSOCKET)OverLapped, sock_io_type, err);
 	//	}
-	//	else if (0 == dwIoSize && (READ == sock_io_type || WRITE == sock_io_type)){
+	//	else if (0 == dwIoSize && (SOCKET_READ == sock_io_type || SOCKET_WRITE == sock_io_type)){
 	//		err = WSAGetLastError();
 	//		do_close((HSOCKET)OverLapped, sock_io_type, err);
 	//	}
@@ -999,18 +1001,13 @@ int __STDCALL ActorStart(int thread_count){
 	ThreadStats = (ThreadStat*)malloc((ActorThreadWorker+1) * sizeof(ThreadStat));
 	if (!ThreadStats) return -2;
 
-	ThreadStat* ts;
-	ListenCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-	if (!ListenCompletionPort) return -1;
-	ts = THREAD_STATES_AT(ActorThreadWorker);
-	ts->CompletionPort = ListenCompletionPort;
-	ts->WorkerCount = 0;
-	
-	for (int i = 0; i < ActorThreadWorker; i++) {
+	ThreadStat* ts = NULL;	
+	for (int i = 0; i <= ActorThreadWorker; i++) {
 		ts = THREAD_STATES_AT(i);
 		ts->CompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
 		ts->WorkerCount = 0;
 	}
+	ListenCompletionPort = ts->CompletionPort;
 
 	HMODULE ntmodule = GetModuleHandleA("ntdll.dll");
 	if (!ntmodule) {
@@ -1023,7 +1020,7 @@ int __STDCALL ActorStart(int thread_count){
 		return -4;
 	}
 
-	SOCKET tempSock = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
+	SOCKET tempSock = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	//使用WSAIoctl获取AcceptEx和ConnectEx函数指针
 	DWORD dwbytes = 0;
 	GUID guidAcceptEx = WSAID_ACCEPTEX;
@@ -1148,7 +1145,7 @@ static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, int listen_port
 	}
 	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
-	IocpSock->event_type = READ;
+	IocpSock->event_type = SOCKET_READ;
 	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG,
 		(struct sockaddr*)&IocpSock->peer_addr, &sockaddr_len, &IocpSock->overlapped, NULL)){
 		if (ERROR_IO_PENDING != WSAGetLastError()){
@@ -1163,7 +1160,7 @@ HSOCKET __STDCALL HsocketListenUDP(BaseWorker* worker, const char* ip, int port)
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL; 
 
-	IocpSock->event_type = CONNECT;
+	IocpSock->event_type = SOCKET_CONNECT;
 	IocpSock->protocol = UDP_PROTOCOL;
 	IocpSock->worker = worker;
 	IocpSock->peer_addr.sin6_family = AF_INET6;
@@ -1222,7 +1219,7 @@ HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, P
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL;
 
-	IocpSock->event_type = CONNECT;
+	IocpSock->event_type = SOCKET_CONNECT;
 	IocpSock->protocol = protocol;
 	IocpSock->worker = worker;
 	IocpSock->peer_addr.sin6_family = AF_INET6;
@@ -1286,7 +1283,7 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 	}
 	memset(IocpBuff, 0x0, sizeof(Socket_Send_Content));
 	if (IocpBuff == NULL) return false;
-	IocpBuff->event_type = WRITE;
+	IocpBuff->event_type = SOCKET_WRITE;
 	IocpBuff->databuf.buf = (char*)malloc(len);
 	if (IocpBuff->databuf.buf == NULL){
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -1381,7 +1378,7 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 		memcpy(IocpBuff->databuf.buf, data, len);
 		IocpBuff->databuf.len = len;
 		memset(&IocpBuff->overlapped, 0, sizeof(OVERLAPPED));
-		IocpBuff->event_type = WRITE;
+		IocpBuff->event_type = SOCKET_WRITE;
 		
 		struct sockaddr_in6 toaddr = { 0x0 };
 		toaddr.sin6_family = AF_INET6;
@@ -1405,6 +1402,7 @@ void __STDCALL HsocketClose(HSOCKET hsock){
 	if (!hsock || hsock->fd == INVALID_SOCKET || hsock->fd == NULL) return;
 	closesocket(hsock->fd);
 	hsock->fd = NULL;
+	hsock->event_type = SOCKET_CLOSE;
 	return;
 }
 
@@ -1413,6 +1411,7 @@ void __STDCALL HsocketClosed(HSOCKET hsock) {
 	closesocket(hsock->fd);
 	hsock->fd = INVALID_SOCKET;
 	hsock->worker->ref_count--;
+	hsock->event_type = SOCKET_CLOSE;
 }
 
 int __STDCALL HsocketPopBuf(HSOCKET hsock, int len)
@@ -1486,14 +1485,14 @@ void __STDCALL HsocketLocalAddr(HSOCKET hsock, char* ip, size_t ipsz, int* port)
 void __STDCALL HsocketUnbindWorker(HSOCKET hsock, void* user_data, WorkerBind_Callback ucall) {
 	hsock->bind_call = ucall;
 	hsock->call_data = user_data;
-	hsock->event_type = UNBIND;
+	hsock->event_type = SOCKET_UNBIND;
 }
 
 void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user_data, WorkerBind_Callback call) {
 	hsock->rebind_worker = worker;
 	hsock->bind_call = call;
 	hsock->call_data = user_data;
-	hsock->event_type = REBIND;
+	hsock->event_type = SOCKET_REBIND;
 
 	if (hsock->worker) return;
 

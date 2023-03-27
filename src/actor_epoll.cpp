@@ -1125,7 +1125,7 @@ void PostEvent(BaseWorker* worker, void* event_data, Event_Callback callback){
 	event_ctx.worker = worker;
 	event_ctx.event_data = event_data;
 	
-	ThreadStat* ts = ThreadDistribution(worker);
+	ThreadStat* ts = worker ? ThreadDistribution(worker) : NULL;
 	int pipewfd = ts? ts->pipefd[1] : pipe_write_fd;
 	write(pipewfd, &event_ctx, sizeof(Event_Content));
 }
@@ -1137,7 +1137,7 @@ void PostSignal(BaseWorker* worker, long long signal, Signal_Callback callback){
 	signal_ctx.worker = worker;
 	signal_ctx.signal = signal;
 	
-	ThreadStat* ts = ThreadDistribution(worker);
+	ThreadStat* ts = worker ? ThreadDistribution(worker) : NULL;
 	int pipewfd = ts? ts->pipefd[1] : pipe_write_fd;
 	write(pipewfd, &signal_ctx, sizeof(Event_Content));
 }

@@ -298,29 +298,27 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 	IocpSock->event_type = SOCKET_ACCEPT;
 	IocpSock->worker = NULL;
 	IocpSock->sock_data = accepter;
-	IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
-	if (IocpSock->recv_buf == NULL){
+	char* recv_buf = (char*)malloc(DATA_BUFSIZE);
+	if (recv_buf == NULL){
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
 		ReleaseIOCP_Socket(IocpSock);
 		return -2;
 	}
+	IocpSock->recv_buf = recv_buf;
 	IocpSock->size = DATA_BUFSIZE;
-	IocpSock->databuf.buf = IocpSock->recv_buf;
-	IocpSock->databuf.len = DATA_BUFSIZE;
 
-	IocpSock->fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
-	if (IocpSock->fd == INVALID_SOCKET){
+	SOCKET fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+	if (fd == INVALID_SOCKET){
 		ReleaseIOCP_Socket(IocpSock);
 		return -3;
 	}
+	IocpSock->fd = fd;
 	u_long nonblock = 1;
-	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
-	set_linger_for_fd(IocpSock->fd);
+	ioctlsocket(fd, FIONBIO, &nonblock);
+	set_linger_for_fd(fd);
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
-	bool rc = lpfnAcceptEx(accepter->Listenfd, IocpSock->fd,
-		IocpSock->databuf.buf, 0,
-		sizeof(struct sockaddr_in6) + 16, sizeof(struct sockaddr_in6) + 16,
-		&IocpSock->databuf.len, &(IocpSock->overlapped));
+#define NetAddrLength sizeof(struct sockaddr_in6) + 16
+	bool rc = lpfnAcceptEx(accepter->Listenfd, fd, recv_buf, 0, NetAddrLength, NetAddrLength, NULL, &(IocpSock->overlapped));
 	if (false == rc){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
 			ReleaseIOCP_Socket(IocpSock);
@@ -395,16 +393,8 @@ static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	return 0;
 }
 
-static bool ResetIocp_Buff(HSOCKET IocpSock){
+static inline bool ResetIocp_Buff(HSOCKET IocpSock){
 	memset(&IocpSock->overlapped, 0, sizeof(OVERLAPPED));
-	if (IocpSock->recv_buf == NULL){
-		IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
-		if (IocpSock->recv_buf == NULL) {
-			printf("%s:%d memory malloc error\n", __func__, __LINE__);
-			return false;
-		}
-		IocpSock->size = DATA_BUFSIZE;
-	}
 	IocpSock->databuf.len = IocpSock->size - IocpSock->offset;
 	if (IocpSock->databuf.len == 0){
 		int new_size = IocpSock->size * 2;
@@ -472,12 +462,13 @@ static void do_accept_go_on(BaseAccepter* accepter) {
 	BaseWorker* worker;
 	struct sockaddr_in6 addr;
 	int len = sizeof(addr);
+	u_long nonblock = 1;
+	HANDLE CompletionPort;
+	char* recv_buf;
 
 	while (1) {
-		//fd = WSAAccept(listenfd, (struct sockaddr*)&addr, &len, NULL, NULL);
 		fd = accept(listenfd, (struct sockaddr*)&addr, &len);
 		if (fd == INVALID_SOCKET) break;
-		u_long nonblock = 1;
 		ioctlsocket(fd, FIONBIO, &nonblock);
 		set_linger_for_fd(fd);
 
@@ -491,21 +482,21 @@ static void do_accept_go_on(BaseAccepter* accepter) {
 		IocpSock->event_type = SOCKET_ACCEPTED;
 		IocpSock->worker = worker;
 		IocpSock->sock_data = accepter;
-		IocpSock->recv_buf = (char*)malloc(DATA_BUFSIZE);
-		if (IocpSock->recv_buf == NULL) {
+		recv_buf = (char*)malloc(DATA_BUFSIZE);
+		if (recv_buf == NULL) {
 			printf("%s:%d memory malloc error\n", __func__, __LINE__);
 			goto error;
 		}
+		IocpSock->recv_buf = recv_buf;
 		IocpSock->size = DATA_BUFSIZE;
-		IocpSock->databuf.buf = IocpSock->recv_buf;
-		IocpSock->databuf.len = DATA_BUFSIZE;
 		memcpy(&IocpSock->peer_addr, &addr, sizeof(addr));
 
 		if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
 		ts = ThreadDistribution(worker);
-		CreateIoCompletionPort((HANDLE)fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
+		CompletionPort = ts->CompletionPort;
+		CreateIoCompletionPort((HANDLE)fd, CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 		SetFileCompletionNotificationModes((HANDLE)fd, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
-		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
+		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
 		continue;
 	error:
 		if (IocpSock) ReleaseIOCP_Socket(IocpSock);
@@ -516,8 +507,8 @@ static void do_accept_go_on(BaseAccepter* accepter) {
 static int do_accept(HSOCKET IocpSock){
 	BaseAccepter* accepter = (BaseAccepter*)IocpSock->sock_data;
 	
-	/*连接成功后刷新套接字属性, 这个操作耗时严重，且先注释掉，貌似也不会又什么问题*/
-	//setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
+	/*连接成功后刷新套接字属性, 不然获取套接字属性可能会出错*/
+	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
 	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE| FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 	//hsocket_set_keepalive(IocpSock->fd);
 
@@ -528,13 +519,15 @@ static int do_accept(HSOCKET IocpSock){
 		IocpSock->worker = worker;
 		IocpSock->sock_data = NULL;
 		IocpSock->event_type = SOCKET_ACCEPTED;
-		ThreadStat* ts = ThreadDistribution(worker);
-
+		
+		SOCKET fd = IocpSock->fd;
 		int nSize = sizeof(IocpSock->peer_addr);
-		getpeername(IocpSock->fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
+		getpeername(fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
 
-		CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
-		PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
+		ThreadStat* ts = ThreadDistribution(worker);
+		HANDLE CompletionPort = ts->CompletionPort;
+		CreateIoCompletionPort((HANDLE)fd, CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
+		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
 		do_accept_go_on(accepter);
 		if (PostAcceptClient(accepter)) accepter->Listening = false;
 	}
@@ -1123,30 +1116,32 @@ void __STDCALL PostSignal(BaseWorker* worker, long long signal, Signal_Callback 
 
 static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, int listen_port)
 {
-	IocpSock->fd = WSASocket(AF_INET6, SOCK_DGRAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
-	if (IocpSock->fd == INVALID_SOCKET) return false;
+	SOCKET fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (fd == INVALID_SOCKET) return false;
+	IocpSock->fd = fd;
 
 	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin6_family = AF_INET6;
 	local_addr.sin6_port = ntohs(listen_port);
 	local_addr.sin6_addr = in6addr_any;
-	socket_set_v6only(IocpSock->fd, 0);
+	socket_set_v6only(fd, 0);
 
 	u_long nonblock = 1;
-	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
-	set_linger_for_fd(IocpSock->fd);
-	if (bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
+	ioctlsocket(fd, FIONBIO, &nonblock);
+	set_linger_for_fd(fd);
+	if (bind(fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
+
+	ThreadStat* ts = ThreadDistribution(worker);
+	CreateIoCompletionPort((HANDLE)fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 
 	if (ResetIocp_Buff(IocpSock) == false){
 		return false;
 	}
-	ThreadStat* ts = ThreadDistribution(worker);
-	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 	IocpSock->event_type = SOCKET_READ;
-	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG,
+	if (SOCKET_ERROR == WSARecvFrom(fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG,
 		(struct sockaddr*)&IocpSock->peer_addr, &sockaddr_len, &IocpSock->overlapped, NULL)){
 		if (ERROR_IO_PENDING != WSAGetLastError()){
 			return false;
@@ -1160,6 +1155,14 @@ HSOCKET __STDCALL HsocketListenUDP(BaseWorker* worker, const char* ip, int port)
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL; 
 
+	char* recv_buf = (char*)malloc(DATA_BUFSIZE);
+	if (recv_buf == NULL) {
+		printf("%s:%d memory malloc error\n", __func__, __LINE__);
+		ReleaseIOCP_Socket(IocpSock);
+		return NULL;
+	}
+	IocpSock->recv_buf = recv_buf;
+	IocpSock->size = DATA_BUFSIZE;
 	IocpSock->event_type = SOCKET_CONNECT;
 	IocpSock->protocol = UDP_PROTOCOL;
 	IocpSock->worker = worker;
@@ -1180,32 +1183,25 @@ HSOCKET __STDCALL HsocketListenUDP(BaseWorker* worker, const char* ip, int port)
 }
 
 static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock){
-	IocpSock->fd = WSASocket(AF_INET6, SOCK_STREAM, 0, NULL, 0, WSA_FLAG_OVERLAPPED);
-	if (IocpSock->fd == INVALID_SOCKET) return false;
+	SOCKET fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+	if (fd == INVALID_SOCKET) return false;
+	IocpSock->fd = fd;
+
 	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin6_family = AF_INET6;
-	socket_set_v6only(IocpSock->fd, 0);
+	socket_set_v6only(fd, 0);
 
 	u_long nonblock = 1;
-	ioctlsocket(IocpSock->fd, FIONBIO, &nonblock);
-	set_linger_for_fd(IocpSock->fd);
-	if (bind(IocpSock->fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
+	ioctlsocket(fd, FIONBIO, &nonblock);
+	set_linger_for_fd(fd);
+	if (bind(fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
 	ThreadStat* ts = ThreadDistribution(worker);
-	CreateIoCompletionPort((HANDLE)IocpSock->fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
+	CreateIoCompletionPort((HANDLE)fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 
-	PVOID lpSendBuffer = NULL;
-	DWORD dwSendDataLength = 0;
-	DWORD dwBytesSent = 0;
-	BOOL bResult = lpfnConnectEx(IocpSock->fd,
-		(struct sockaddr*)&IocpSock->peer_addr,	// [in] 对方地址
-		sizeof(IocpSock->peer_addr),		// [in] 对方地址长度
-		lpSendBuffer,			// [in] 连接后要发送的内容，这里不用
-		dwSendDataLength,		// [in] 发送内容的字节数 ，这里不用
-		&dwBytesSent,			// [out] 发送了多少个字节，这里不用
-		&(IocpSock->overlapped));
+	BOOL bResult = lpfnConnectEx(fd, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr), NULL, 0, NULL, &IocpSock->overlapped);
 	if (!bResult){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
 			return false;
@@ -1219,6 +1215,14 @@ HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, P
 	HSOCKET IocpSock = NewIOCP_Socket();
 	if (IocpSock == NULL) return NULL;
 
+	char* recv_buf = (char*)malloc(DATA_BUFSIZE);
+	if (recv_buf == NULL) {
+		printf("%s:%d memory malloc error\n", __func__, __LINE__);
+		ReleaseIOCP_Socket(IocpSock);
+		return NULL;
+	}
+	IocpSock->recv_buf = recv_buf;
+	IocpSock->size = DATA_BUFSIZE;
 	IocpSock->event_type = SOCKET_CONNECT;
 	IocpSock->protocol = protocol;
 	IocpSock->worker = worker;
@@ -1284,13 +1288,14 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 	memset(IocpBuff, 0x0, sizeof(Socket_Send_Content));
 	if (IocpBuff == NULL) return false;
 	IocpBuff->event_type = SOCKET_WRITE;
-	IocpBuff->databuf.buf = (char*)malloc(len);
-	if (IocpBuff->databuf.buf == NULL){
+	char* buf = (char*)malloc(len);
+	if (buf == NULL){
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
 		free(IocpBuff);
 		return false;
 	}
-	memcpy(IocpBuff->databuf.buf, data, len);
+	IocpBuff->databuf.buf = buf;
+	memcpy(buf, data, len);
 	IocpBuff->databuf.len = len;
 
 	bool ret = false;
@@ -1308,7 +1313,7 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 		)
 		ret = IOCPPostSendUDPEx(IocpSock, IocpBuff, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr));
 	if (ret == false){
-		free(IocpBuff->databuf.buf);
+		free(buf);
 		free(IocpBuff);
 		return false;
 	}

@@ -27,6 +27,7 @@
 #ifdef OPENSSL_SUPPORT
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include "sys/signal.h"
 #define SSL_PACK_SIZE 15*1024
 #endif
 
@@ -926,6 +927,7 @@ int ActorStart(int thread_count){
 	epoll_listen_fd = ts->epoll_fd;
 
 #ifdef OPENSSL_SUPPORT
+	signal(SIGPIPE, SIG_IGN);
 	SSL_library_init();
 	SSL_load_error_strings();
 	OpenSSL_add_all_algorithms();

@@ -383,7 +383,7 @@ static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	if (IocpSock->fd != INVALID_SOCKET){
 		BaseWorker* worker = IocpSock->worker;
 		worker->ref_count--;
-		if (SOCKET_READ == IocpSock->event_type)
+		if (SOCKET_CONNECT != IocpSock->event_type)
 			worker->ConnectionClosed(IocpSock, err);
 		else
 			worker->ConnectionFailed(IocpSock, err);
@@ -847,6 +847,7 @@ start:
 		IocpSock->offset += dwIoSize;
 		dwIoSize = do_read(IocpSock);
 		break;
+	case SOCKET_CLOSE:
 	case SOCKET_WRITE:
 		dwIoSize = do_close(IocpSock, sock_io_type, 0);
 		break;

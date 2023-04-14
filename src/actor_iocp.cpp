@@ -426,6 +426,7 @@ static inline int PostRecvTCP(HSOCKET IocpSock){
 	DWORD recv_len = 0;
 	int ret = WSARecv(IocpSock->fd, &IocpSock->databuf, 1, &recv_len, &WSARECV_FLAG, &IocpSock->overlapped, NULL);
 	if (SOCKET_ERROR != ret) {
+		if (recv_len == 0) do_close(IocpSock, IocpSock->event_type, 0);  //接收到0个字节关闭连接
 		return recv_len;
 	} 
 	else{
@@ -847,7 +848,6 @@ start:
 		IocpSock->offset += dwIoSize;
 		dwIoSize = do_read(IocpSock);
 		break;
-	case SOCKET_CLOSE:
 	case SOCKET_WRITE:
 		dwIoSize = do_close(IocpSock, sock_io_type, 0);
 		break;
@@ -911,7 +911,7 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 					}
 				}
 				sock_io_type = ((HSENDBUFF)OverLapped)->event_type;
-				if (0 == dwIoSize && (SOCKET_READ == sock_io_type || SOCKET_WRITE == sock_io_type)) {
+				if (SOCKET_CLOSE == sock_io_type || (0 == dwIoSize && (SOCKET_READ == sock_io_type || SOCKET_WRITE == sock_io_type))) {
 					err = WSAGetLastError();   //GetOverlappedResult(hsock->fd, OverLapped, dwIoSize, );
 					do_close((HSOCKET)OverLapped, sock_io_type, err);
 				}

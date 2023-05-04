@@ -318,7 +318,7 @@ static inline int PostAcceptClient(BaseAccepter* accepter){
 	set_linger_for_fd(fd);
 	/*调用AcceptEx函数，地址长度需要在原有的上面加上16个字节向服务线程投递一个接收连接的的请求*/
 #define NetAddrLength sizeof(struct sockaddr_in6) + 16
-	bool rc = lpfnAcceptEx(accepter->Listenfd, fd, recv_buf, 0, NetAddrLength, NetAddrLength, NULL, &(IocpSock->overlapped));
+	bool rc = lpfnAcceptEx(accepter->Listenfd, fd, recv_buf, 0, NetAddrLength, NetAddrLength, NULL, (LPOVERLAPPED)IocpSock);
 	if (false == rc){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
 			ReleaseIOCP_Socket(IocpSock);
@@ -370,7 +370,7 @@ static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 			IocpSock->worker = worker;
 			IocpSock->event_type = SOCKET_REBIND;
 			ThreadStat* ts = ThreadDistribution(worker);
-			PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)&IocpSock->overlapped);
+			PostQueuedCompletionStatus(ts->CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)IocpSock);
 
 			delete_worker(old);
 		}
@@ -394,7 +394,7 @@ static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 }
 
 static inline bool ResetIocp_Buff(HSOCKET IocpSock){
-	memset(&IocpSock->overlapped, 0, sizeof(OVERLAPPED));
+	memset((LPOVERLAPPED)IocpSock, 0, sizeof(OVERLAPPED));
 	IocpSock->databuf.len = IocpSock->size - IocpSock->offset;
 	if (IocpSock->databuf.len == 0){
 		int new_size = IocpSock->size * 2;
@@ -413,7 +413,7 @@ static inline bool ResetIocp_Buff(HSOCKET IocpSock){
 
 static inline int PostRecvUDP(HSOCKET IocpSock){
 	if (SOCKET_ERROR == WSARecvFrom(IocpSock->fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG,
-		(struct sockaddr*)&IocpSock->peer_addr, &sockaddr_len, &IocpSock->overlapped, NULL)){
+		(struct sockaddr*)&IocpSock->peer_addr, &sockaddr_len, (LPOVERLAPPED)IocpSock, NULL)){
 		int err = WSAGetLastError();
 		if (ERROR_IO_PENDING != err){
 			return do_close(IocpSock, IocpSock->event_type, err);
@@ -424,7 +424,7 @@ static inline int PostRecvUDP(HSOCKET IocpSock){
 
 static inline int PostRecvTCP(HSOCKET IocpSock){
 	DWORD recv_len = 0;
-	int ret = WSARecv(IocpSock->fd, &IocpSock->databuf, 1, &recv_len, &WSARECV_FLAG, &IocpSock->overlapped, NULL);
+	int ret = WSARecv(IocpSock->fd, &IocpSock->databuf, 1, &recv_len, &WSARECV_FLAG, (LPOVERLAPPED)IocpSock, NULL);
 	if (SOCKET_ERROR != ret) {
 		if (recv_len == 0) do_close(IocpSock, IocpSock->event_type, 0);  //接收到0个字节关闭连接
 		return recv_len;
@@ -497,7 +497,7 @@ static void do_accept_go_on(BaseAccepter* accepter) {
 		CompletionPort = ts->CompletionPort;
 		CreateIoCompletionPort((HANDLE)fd, CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 		SetFileCompletionNotificationModes((HANDLE)fd, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
-		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
+		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)IocpSock);
 		continue;
 	error:
 		if (IocpSock) ReleaseIOCP_Socket(IocpSock);
@@ -528,7 +528,7 @@ static int do_accept(HSOCKET IocpSock){
 		ThreadStat* ts = ThreadDistribution(worker);
 		HANDLE CompletionPort = ts->CompletionPort;
 		CreateIoCompletionPort((HANDLE)fd, CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
-		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, &IocpSock->overlapped);
+		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)IocpSock);
 		do_accept_go_on(accepter);
 		if (PostAcceptClient(accepter)) accepter->Listening = false;
 	}
@@ -1143,7 +1143,7 @@ static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, int listen_port
 	}
 	IocpSock->event_type = SOCKET_READ;
 	if (SOCKET_ERROR == WSARecvFrom(fd, &IocpSock->databuf, 1, NULL, &WSARECV_FLAG,
-		(struct sockaddr*)&IocpSock->peer_addr, &sockaddr_len, &IocpSock->overlapped, NULL)){
+		(struct sockaddr*)&IocpSock->peer_addr, &sockaddr_len, (LPOVERLAPPED)IocpSock, NULL)){
 		if (ERROR_IO_PENDING != WSAGetLastError()){
 			return false;
 		}
@@ -1202,7 +1202,7 @@ static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock){
 	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 
-	BOOL bResult = lpfnConnectEx(fd, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr), NULL, 0, NULL, &IocpSock->overlapped);
+	BOOL bResult = lpfnConnectEx(fd, (struct sockaddr*)&IocpSock->peer_addr, sizeof(IocpSock->peer_addr), NULL, 0, NULL, (LPOVERLAPPED)IocpSock);
 	if (!bResult){
 		if (WSAGetLastError() != ERROR_IO_PENDING){
 			return false;
@@ -1260,7 +1260,7 @@ HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, P
 }
 
 static bool IOCPPostSendUDPEx(HSOCKET IocpSock, HSENDBUFF IocpBuff, struct sockaddr* addr, int addrlen){
-	if (SOCKET_ERROR == WSASendTo(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, addr, addrlen, &IocpBuff->overlapped, NULL)){
+	if (SOCKET_ERROR == WSASendTo(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, addr, addrlen, (LPOVERLAPPED)IocpBuff, NULL)){
 		if (ERROR_IO_PENDING != WSAGetLastError())
 			return false;
 	}
@@ -1269,7 +1269,7 @@ static bool IOCPPostSendUDPEx(HSOCKET IocpSock, HSENDBUFF IocpBuff, struct socka
 
 static bool IOCPPostSendTCPEx(HSOCKET IocpSock, HSENDBUFF IocpBuff){
 	int send_len = 0;
-	int ret = WSASend(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, &IocpBuff->overlapped, NULL);
+	int ret = WSASend(IocpSock->fd, &IocpBuff->databuf, 1, NULL, 0, (LPOVERLAPPED)IocpBuff, NULL);
 	if (SOCKET_ERROR != ret) {
 		if (IocpBuff->databuf.buf != NULL) free(IocpBuff->databuf.buf);
 		free(IocpBuff);
@@ -1383,7 +1383,7 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 		}
 		memcpy(IocpBuff->databuf.buf, data, len);
 		IocpBuff->databuf.len = len;
-		memset(&IocpBuff->overlapped, 0, sizeof(OVERLAPPED));
+		memset((LPOVERLAPPED)IocpBuff, 0, sizeof(OVERLAPPED));
 		IocpBuff->event_type = SOCKET_WRITE;
 		
 		struct sockaddr_in6 toaddr = { 0x0 };
@@ -1505,7 +1505,7 @@ void __STDCALL HsocketRebindWorker(HSOCKET hsock, BaseWorker* worker, void* user
 	hsock->worker = worker;
 	ThreadStat* ts = ThreadDistribution(worker);
 	HANDLE CompletionPort = ts->CompletionPort;
-	PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, (LPOVERLAPPED)&hsock->overlapped);
+	PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)hsock, (LPOVERLAPPED)hsock);
 }
 
 int __STDCALL GetHostByName(const char* name, char* buf, size_t size) {

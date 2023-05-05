@@ -111,7 +111,7 @@ extern "C"
 	Actor_API	void		__STDCALL ThreadUnDistribution(BaseWorker* worker);
 
 	Actor_API int		__STDCALL	ActorStart(int thread_count);
-	Actor_API int		__STDCALL	AccepterRun(BaseAccepter* accepter);
+	Actor_API int		__STDCALL	AccepterRun(BaseAccepter* accepter, const char* ip, int port);
 	Actor_API int		__STDCALL	AccepterStop(BaseAccepter* accepter);
 
 	Actor_API HSOCKET	__STDCALL	HsocketListenUDP(BaseWorker* worker, const char* ip, int port);
@@ -396,8 +396,6 @@ public:
 */
 class BaseAccepter{
 public:
-	char			ServerAddr[40] = { 0x0 };
-	unsigned short	ServerPort = 0;
 	bool			Listening = false;
 #ifdef __WINDOWS__
 	SOCKET			Listenfd = NULL;
@@ -407,14 +405,11 @@ public:
 
 	BaseAccepter() {};
 	virtual ~BaseAccepter() {};
-	int listen(const char* addr, unsigned short listenport) {
-		snprintf(this->ServerAddr, sizeof(this->ServerAddr), "%s", addr);
-		this->ServerPort = listenport;
-		return AccepterRun(this);
+	int listen(const char* ip, unsigned short listenport) {
+		return AccepterRun(this, ip, listenport);
 	};
 	void stop() { AccepterStop(this); };
 
-	virtual bool	Init() = 0;
 	virtual BaseWorker*	GetWorker() = 0;
 };
 #define BASEACCEPTER_SIZE sizeof(BaseAccepter)
@@ -425,7 +420,6 @@ class Factory:public BaseAccepter
 public:
 	Factory() {};
 	~Factory() {};
-	bool	Init() { return true; };
 	BaseWorker* GetWorker() { return new WORKER; };
 };
 

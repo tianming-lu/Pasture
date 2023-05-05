@@ -935,11 +935,10 @@ int ActorStart(int thread_count){
 	return runEpollServer();
 }
 
-int	AccepterRun(BaseAccepter* accepter){
-	if (accepter->Listening || !accepter->Init())  return -1;
-	accepter->Listening = true;
-	if (accepter->ServerPort > 0){
-		accepter->Listenfd = get_listen_sock(accepter->ServerAddr, accepter->ServerPort);
+int	AccepterRun(BaseAccepter* accepter, const char* ip, int listen_port){
+	if (listen_port > 0){
+		accepter->Listening = true;
+		accepter->Listenfd = get_listen_sock(ip, listen_port);
 		if (accepter->Listenfd < 0){
 			printf("%s:%d %d\n", __func__, __LINE__, accepter->Listenfd);
 			accepter->Listening = false;

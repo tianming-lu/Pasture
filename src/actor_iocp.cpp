@@ -1037,11 +1037,10 @@ int __STDCALL ActorStart(int thread_count){
 	return runIOCPServer();
 }
 
-int __STDCALL AccepterRun(BaseAccepter* accepter){
-	if (accepter->Listening || !accepter->Init()) return -1;
-	accepter->Listening = true;
-	if (accepter->ServerPort != 0){
-		accepter->Listenfd = get_listen_sock(accepter->ServerAddr, accepter->ServerPort);
+int __STDCALL AccepterRun(BaseAccepter* accepter, const char* ip, int listen_port){
+	if (listen_port != 0){
+		accepter->Listening = true;
+		accepter->Listenfd = get_listen_sock(ip, listen_port);
 		if (accepter->Listenfd == SOCKET_ERROR) {
 			accepter->Listening = false;
 			return -2;

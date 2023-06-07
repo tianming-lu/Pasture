@@ -185,7 +185,11 @@ typedef struct Socket_Content {
 	SOCKET			fd;
 	BaseWorker*		worker;
 	void*			sock_data;
-	void*			user_data;
+	union{
+		void*		user_ptr;
+		long long	user_val;
+	};
+	
 }*HSOCKET;
 #define SOCKET_CTX_SIZE sizeof(Socket_Content)
 
@@ -244,7 +248,10 @@ typedef struct Socket_Content {
 	int	epoll_fd;
 	BaseWorker*		worker;
 	void*			sock_data;
-	void*			user_data;
+	union {
+		void*		user_ptr;
+		long long	user_val;
+	};
 }*HSOCKET;
 #define SOCKET_CTX_SIZE sizeof(Socket_Content)
 

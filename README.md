@@ -29,7 +29,7 @@
 	HsocketSSLCreate(tcp_sock, SSL_CLIENT, 0, ca_crt, user_crt, pri_key);
 
 	HsocketKcpCreate(udp_sock, conv, 0);
-	HsocketKcpUpdate(udp_sock, hsock);
+	HsocketKcpUpdate(udp_sock);
 
 	HsocketSend(sock, data, len);
 	HsocketClose(sock);

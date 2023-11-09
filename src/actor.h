@@ -86,7 +86,6 @@ typedef unsigned char PROTOCOL;
 #define	TIMER 0x03
 #define	EVENT 0x05
 #define	SIGNAL 0x06
-#define	HTTP_PROTOCOL 0x08
 
 extern int ActorThreadWorker;
 
@@ -156,7 +155,6 @@ extern "C"
 typedef struct Socket_Send_Content {
 	OVERLAPPED	overlapped;
 	WSABUF		databuf;
-	char		event_type;	//投递类型accept, conect, read, write
 }*HSENDBUFF;
 #define SEND_CTX_SIZE sizeof(Socket_Send_Content)
 
@@ -403,12 +401,14 @@ public:
 */
 class BaseAccepter{
 public:
-	bool			Listening = false;
+	char	thread_id = ActorThreadWorker;
+	bool	Listening = false;
 #ifdef __WINDOWS__
-	SOCKET			Listenfd = NULL;
+	SOCKET	Listenfd = NULL;
 #else
-	int				Listenfd = 0;
+	int		Listenfd = 0;
 #endif // __WINDOWS__
+	void(*accepted)(BaseAccepter*, HSOCKET) = NULL;
 
 	BaseAccepter() {};
 	virtual ~BaseAccepter() {};

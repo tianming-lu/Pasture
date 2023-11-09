@@ -281,8 +281,8 @@ static inline void hsocket_set_keepalive(SOCKET fd) {  //这个函数使用有�
 	struct tcp_keepalive in_keep_alive = { 0x0 };
 	unsigned long ul_bytes_return = 0;
 	in_keep_alive.onoff = 1; /*打开keepalive*/
-	in_keep_alive.keepaliveinterval = 1200*000*000; /*发送keepalive心跳时间间隔-单位为毫秒*/
-	in_keep_alive.keepalivetime = 1200*000*000; /*多长时间没有报文开始发送keepalive心跳包-单位为毫秒*/
+	in_keep_alive.keepaliveinterval = 30*000; /*发送keepalive心跳时间间隔-单位为毫秒*/
+	in_keep_alive.keepalivetime = 60*000; /*多长时间没有报文开始发送keepalive心跳包-单位为毫秒*/
 	int ret = WSAIoctl(fd, SIO_KEEPALIVE_VALS, (LPVOID)&in_keep_alive, tcp_keepalive_size,
 		NULL, 0, &ul_bytes_return, NULL, NULL);
 	if (ret == SOCKET_ERROR) {
@@ -334,7 +334,7 @@ static inline void delete_worker(BaseWorker* worker) {
 	}
 }
 
-static int do_close(HSOCKET IocpSock, char sock_io_type, int err){
+static inline int do_close(HSOCKET IocpSock, char sock_io_type, int err){
 	switch (sock_io_type){
 	case SOCKET_ACCEPT: {
 		BaseAccepter* accepter = (BaseAccepter*)(IocpSock->sock_data);
@@ -508,33 +508,37 @@ static void do_accept_go_on(BaseAccepter* accepter) {
 static int do_accept(HSOCKET IocpSock){
 	BaseAccepter* accepter = (BaseAccepter*)IocpSock->sock_data;
 	
+	SOCKET fd = IocpSock->fd;
 	/*连接成功后刷新套接字属性, 不然获取套接字属性可能会出错*/
-	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
-	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE| FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
-	//hsocket_set_keepalive(IocpSock->fd);
+	setsockopt(fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
+	SetFileCompletionNotificationModes((HANDLE)fd, FILE_SKIP_SET_EVENT_ON_HANDLE| FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
+	hsocket_set_keepalive(IocpSock->fd);
+
+	int nSize = sizeof(IocpSock->peer_addr);
+	getpeername(fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
 
 	BaseWorker* worker = accepter->GetWorker();
 	if (worker) {
 		if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
-
 		IocpSock->worker = worker;
 		IocpSock->sock_data = NULL;
 		IocpSock->event_type = SOCKET_ACCEPTED;
-		
-		SOCKET fd = IocpSock->fd;
-		int nSize = sizeof(IocpSock->peer_addr);
-		getpeername(fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
 
 		ThreadStat* ts = ThreadDistribution(worker);
 		HANDLE CompletionPort = ts->CompletionPort;
 		CreateIoCompletionPort((HANDLE)fd, CompletionPort, (ULONG_PTR)IocpSock, 0);	//将监听到的套接字关联到完成端口
 		PostQueuedCompletionStatus(CompletionPort, 0, (ULONG_PTR)IocpSock, (LPOVERLAPPED)IocpSock);
 		do_accept_go_on(accepter);
-		if (PostAcceptClient(accepter)) accepter->Listening = false;
+	}
+	else if (accepter->accepted) {
+		IocpSock->sock_data = NULL;
+		accepter->accepted(accepter, IocpSock);
 	}
 	else {
 		do_close(IocpSock, IocpSock->event_type, -1);
+		return 0;
 	}
+	if (PostAcceptClient(accepter)) accepter->Listening = false;
 	return 0;
 }
 
@@ -781,7 +785,7 @@ static int Hsocket_upto_SSL_Client(HSOCKET IocpSock) {
 #endif
 
 static int do_connect(HSOCKET IocpSock) {
-	//hsocket_set_keepalive(IocpSock->fd);
+	hsocket_set_keepalive(IocpSock->fd);
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);  //连接成功后刷新套接字属性
 	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
 #ifdef OPENSSL_SUPPORT
@@ -845,11 +849,9 @@ static void ProcessIO(HSOCKET IocpSock, char sock_io_type, DWORD dwIoSize){
 start:
 	switch (sock_io_type){
 	case SOCKET_READ:
+		memmove(IocpSock->recv_buf + IocpSock->offset, IocpSock->databuf.buf, dwIoSize);
 		IocpSock->offset += dwIoSize;
 		dwIoSize = do_read(IocpSock);
-		break;
-	case SOCKET_WRITE:
-		dwIoSize = do_close(IocpSock, sock_io_type, 0);
 		break;
 	case SOCKET_ACCEPT:
 		dwIoSize = do_accept(IocpSock);
@@ -910,8 +912,8 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 						continue;
 					}
 				}
-				sock_io_type = ((HSENDBUFF)OverLapped)->event_type;
-				if (SOCKET_CLOSE == sock_io_type || (0 == dwIoSize && (SOCKET_READ == sock_io_type || SOCKET_WRITE == sock_io_type))) {
+				sock_io_type = (!CompletKey || CompletKey == OverLapped) ? ((HSOCKET)OverLapped)->event_type : SOCKET_WRITE;
+				if (SOCKET_CLOSE == sock_io_type || (0 == dwIoSize && (SOCKET_READ == sock_io_type) || SOCKET_WRITE == sock_io_type)) {
 					err = WSAGetLastError();   //GetOverlappedResult(hsock->fd, OverLapped, dwIoSize, );
 					do_close((HSOCKET)OverLapped, sock_io_type, err);
 				}
@@ -946,7 +948,7 @@ DWORD WINAPI serverWorkerThread(HANDLE	CompletionPort){
 	//		if (WAIT_TIMEOUT == err || ERROR_IO_PENDING == err) continue;
 	//		do_close((HSOCKET)OverLapped, sock_io_type, err);
 	//	}
-	//	else if (0 == dwIoSize && (SOCKET_READ == sock_io_type || SOCKET_WRITE == sock_io_type)){
+	//	else if ((0 == dwIoSize && SOCKET_READ == sock_io_type) || SOCKET_WRITE == sock_io_type){
 	//		err = WSAGetLastError();
 	//		do_close((HSOCKET)OverLapped, sock_io_type, err);
 	//	}
@@ -1045,7 +1047,9 @@ int __STDCALL AccepterRun(BaseAccepter* accepter, const char* ip, int listen_por
 			accepter->Listening = false;
 			return -2;
 		}
-		CreateIoCompletionPort((HANDLE)accepter->Listenfd, ListenCompletionPort, (ULONG_PTR)accepter->Listenfd, 0);
+		ThreadStat* ts = THREAD_STATES_AT(accepter->thread_id);
+		HANDLE CompletionPort = ts->CompletionPort;
+		CreateIoCompletionPort((HANDLE)accepter->Listenfd, CompletionPort, NULL, 0);
 		if (PostAcceptClient(accepter)) {
 			accepter->Listening = false;
 			closesocket(accepter->Listenfd);
@@ -1056,8 +1060,9 @@ int __STDCALL AccepterRun(BaseAccepter* accepter, const char* ip, int listen_por
 }
 
 int __STDCALL AccepterStop(BaseAccepter* accepter){
-	if (accepter->Listenfd) {
-		closesocket(accepter->Listenfd);
+	SOCKET fd = accepter->Listenfd;
+	if (fd) {
+		closesocket(fd);
 		accepter->Listenfd = NULL;
 	}
 	else {
@@ -1287,7 +1292,6 @@ static bool HsocketSendEx(HSOCKET IocpSock, const char* data, int len){
 	}
 	memset(IocpBuff, 0x0, sizeof(Socket_Send_Content));
 	if (IocpBuff == NULL) return false;
-	IocpBuff->event_type = SOCKET_WRITE;
 	char* buf = (char*)malloc(len);
 	if (buf == NULL){
 		printf("%s:%d memory malloc error\n", __func__, __LINE__);
@@ -1383,7 +1387,6 @@ bool __STDCALL HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char
 		memcpy(IocpBuff->databuf.buf, data, len);
 		IocpBuff->databuf.len = len;
 		memset((LPOVERLAPPED)IocpBuff, 0, sizeof(OVERLAPPED));
-		IocpBuff->event_type = SOCKET_WRITE;
 		
 		struct sockaddr_in6 toaddr = { 0x0 };
 		toaddr.sin6_family = AF_INET6;

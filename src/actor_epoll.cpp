@@ -248,7 +248,7 @@ static inline void epoll_add_accept(HSOCKET hsock) {
 	struct epoll_event ev;
 	ev.events = EPOLLIN | EPOLLET;
 	ev.data.ptr = hsock;
-	epoll_ctl(epoll_listen_fd, EPOLL_CTL_ADD, hsock->fd, &ev);	
+	epoll_ctl(hsock->epoll_fd, EPOLL_CTL_ADD, hsock->fd, &ev);
 }
 
 static inline void epoll_add_connect(HSOCKET hsock){
@@ -807,24 +807,28 @@ static int do_accept(HSOCKET listenhsock){
 		}
 		memcpy(&hsock->peer_addr, &addr, sizeof(addr));
 		socket_set_keepalive(fd);
+		set_linger_for_fd(fd);
+		fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+		hsock->fd = fd;
+		hsock->_conn_stat = SOCKET_CONNECTING;
 
         BaseWorker* worker = accepter->GetWorker();
-		if (!worker) {
+		if (worker) {
+			if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
+			ThreadStat* ts = ThreadDistribution(worker);
+			hsock->epoll_fd = ts->epoll_fd;
+			hsock->worker = worker;
+			worker->ref_count++;
+			epoll_add_connect(hsock);
+		}
+		else if (accepter->accepted) {
+			accepter->accepted(accepter, hsock);
+		}
+		else{
 			close(fd);
 			release_hsock(hsock);
 			continue;
 		}
-		if (worker->auto_free_flag == FREE_DEF) worker->auto_free_flag = FREE_AUTO;
-		ThreadStat* ts = ThreadDistribution(worker);
-
-        hsock->fd = fd;
-		hsock->worker = worker;
-		hsock->epoll_fd = ts->epoll_fd;
-		hsock->_conn_stat = SOCKET_CONNECTING;
-		set_linger_for_fd(fd);
-        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
-		worker->ref_count++;
-		epoll_add_connect(hsock);
 	}
 	return 1;
 }
@@ -951,7 +955,8 @@ int	AccepterRun(BaseAccepter* accepter, const char* ip, int listen_port){
 			return -3;
 		}
 		hsock->fd = accepter->Listenfd;
-		hsock->epoll_fd = epoll_listen_fd;
+		ThreadStat* ts = THREAD_STATES_AT(accepter->thread_id);
+		hsock->epoll_fd = ts->epoll_fd;
 		hsock->sock_data = accepter;
 		hsock->_conn_stat = SOCKET_ACCEPTING;
 		epoll_add_accept(hsock);

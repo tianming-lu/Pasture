@@ -114,7 +114,7 @@ public:
 int main(){
 	int listen_port = 8000;
 	//启动全局reactor
-	ReactorStart(0);  
+	ActorStart(0);  
 
 	/*通过模板创建一个工厂类*/
 	Factory<EchoServer> factory;

@@ -17,7 +17,7 @@
 #include <iostream>
 #include <functional>
 #include "../src/actor.h"
-#include "../driver/http_client.h"
+//#include "../driver/http_client.h"
 
 #ifdef __WINDOWS__
 #define TimeSleep(x) Sleep(x*1000)
@@ -73,61 +73,41 @@ public:
 	};
 };
 
-struct Test_Content {
-	PROTOCOL			protocol : 3;
-	PROTOCOL			user_protocol : 5;
-};
-
 int main(){
-
-	Test_Content ctx;
-	memset(&ctx, 0x0, sizeof(ctx));
-	ctx.user_protocol = 0;
-	ctx.protocol = SIGNAL;
-	PROTOCOL pro = *(PROTOCOL*)&ctx;
-	printf("%s:%d %d %x\n", __func__, __LINE__, pro, pro);
-
 	int listen_port = 8000;
-	//启动全局reactor
+	//第一步：启动全局reactor
 	ActorStart(0);  
-	http_client_driver_regist();
 
-	/*通过模板创建一个工厂类*/
-	//Factory<EchoServer> factory;
+	//第二步：注册驱动，如果有必要
+	//http_client_driver_regist();
 
-	//printf("factory 启动\n");
-	////factory.listen("0.0.0.0", listen_port);  //仅ipv4
+	/*第三步：通过模板创建一个工厂类*/
+	Factory<EchoServer> factory;
+	printf("factory 启动\n");
+	factory.listen("0.0.0.0", listen_port);  //仅ipv4
 	//factory.listen("::", listen_port);		//ipv4、ipv6双协议栈
-	//printf("正在监听%d端口……\n", listen_port);
+	printf("正在监听%d端口……\n", listen_port);
 
-	char ss[] = "ff\r\n";
-	char* p = ss;
-	long number = strtol(p, &p, 16);
-	printf("%s:%d %ld  %p  %p\n", __func__, __LINE__, number, ss, p);
-
-	printf("创建EchoClient,并连接127.0.0.1:8000\n");
-	EchoClient *client = new EchoClient();
-	client->auto_release(true);
-	client->task([&client, listen_port]() {  //向client所在的线程(非当前线程)安排个任务，用于实现线程安全
+	printf("创建EchoClient,并连接127.0.0.1:%d\n", listen_port);
+	EchoClient client;
+	client.task([&client, listen_port]() {  //向client所在的线程(非当前线程)安排个任务，用于实现线程安全
 		//这一段在woker工作的线程执行
-		
-		//client.sock1 = HsocketConnect(&client, "127.0.0.1", listen_port, TCP_PROTOCOL); 
-		//client.sock2 = HsocketConnect(&client, "127.0.0.1", listen_port, TCP_PROTOCOL);
-		//HttpClient->request("GET", "http://www.baidu.com", NULL, NULL, [](HttpResponse& res, int stat) {
-		//	printf("%s:%d %d %d %s %zd %s\n", __func__, __LINE__, stat, res.state_code, res.state.c_str(), res.content.size(), res.header["Content-Length"].c_str());
-		//	});
-
-		HttpClient->request(client, "GET", "http://www.baidu.com", NULL, NULL, [](HttpTask* task, BaseWorker* worker, HttpResponse* res, int stat) {
-			printf("%s:%d %d %d %s %zd %s\n", __func__, __LINE__, stat, res->state_code, res->state.c_str(), res->content.size(), res->header["Content-Length"].c_str());
-			});
 		printf("%s:%d\n", __func__, __LINE__);
+		client.sock1 = HsocketConnect(&client, "127.0.0.1", listen_port, TCP_PROTOCOL);
+		client.sock2 = HsocketConnect(&client, "127.0.0.1", listen_port, TCP_PROTOCOL);
 	});
-	
-	///* 创建一个定时器，定时发送 hello world */
-	//client.timer.create(&client, 1000, 3000, [&client]() {
-	//	if (client.sock1)HsocketSend(client.sock1, "hello world 1", 13);
-	//	if (client.sock2)HsocketSend(client.sock2, "hello world 2", 13);
-	//});
+
+	/* 创建一个定时器，定时发送 hello world */
+	client.timer.create(&client, 1000, 5000, [&client]() {
+		//这一段在woker工作的线程执行
+		printf("%s:%d 定时器超时\n", __func__, __LINE__);
+		if (client.sock1)HsocketSend(client.sock1, "hello world 1", 13);
+		if (client.sock2)HsocketSend(client.sock2, "hello world 2", 13);
+		});
+
+	//HttpClient->request(&client, "GET", "http://www.baidu.com", NULL, NULL, [](HttpTask* task, BaseWorker* worker, HttpResponse* res, int stat) {
+	//	printf("%s:%d http返回： %d %d %s %zd %s\n", __func__, __LINE__, stat, res->state_code, res->state.c_str(), res->content.size(), res->header["Content-Length"].c_str());
+	//	});
 
 	//TimeSleep(10);
 	//printf("factory 优雅关闭\n");

@@ -82,7 +82,7 @@ ThreadStat* __STDCALL ThreadDistribution(BaseWorker* worker) {
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
 	tsa = THREAD_STATES_AT(0);
-	for (int i = 1; i <= ActorThreadWorker; i++) {
+	for (int i = 1; i < ActorThreadWorker; i++) {
 		tsb = THREAD_STATES_AT(i);
 		if (tsb->WorkerCount < tsa->WorkerCount) {
 			tsa = tsb;
@@ -276,16 +276,20 @@ static inline SOCKET get_listen_sock(const char* ip, int port){
 
 static inline void hsocket_set_keepalive(SOCKET fd) {  //这个函数使用有问题，尚未验证其正确性
 	int keepalive = 1;
-	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepalive, sizeof(keepalive));
+	int ret = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const char*)&keepalive, sizeof(keepalive));
+	if (ret < 0) {
+		printf("%s:%d %d\n", __func__, __LINE__, WSAGetLastError());
+	}
+
 #define tcp_keepalive_size sizeof(struct tcp_keepalive)
 	struct tcp_keepalive in_keep_alive = { 0x0 };
 	unsigned long ul_bytes_return = 0;
 	in_keep_alive.onoff = 1; /*打开keepalive*/
-	in_keep_alive.keepaliveinterval = 30*000; /*发送keepalive心跳时间间隔-单位为毫秒*/
+	in_keep_alive.keepaliveinterval = 5*000; /*发送keepalive心跳时间间隔-单位为毫秒*/
 	in_keep_alive.keepalivetime = 60*000; /*多长时间没有报文开始发送keepalive心跳包-单位为毫秒*/
-	int ret = WSAIoctl(fd, SIO_KEEPALIVE_VALS, (LPVOID)&in_keep_alive, tcp_keepalive_size,
+	ret = WSAIoctl(fd, SIO_KEEPALIVE_VALS, (LPVOID)&in_keep_alive, tcp_keepalive_size,
 		NULL, 0, &ul_bytes_return, NULL, NULL);
-	if (ret == SOCKET_ERROR) {
+	if (ret != 0) {
 		printf("%s:%d %d\n", __func__, __LINE__, WSAGetLastError());
 	}
 }
@@ -512,7 +516,7 @@ static int do_accept(HSOCKET IocpSock){
 	/*连接成功后刷新套接字属性, 不然获取套接字属性可能会出错*/
 	setsockopt(fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&(accepter->Listenfd), sizeof(accepter->Listenfd));
 	SetFileCompletionNotificationModes((HANDLE)fd, FILE_SKIP_SET_EVENT_ON_HANDLE| FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
-	hsocket_set_keepalive(IocpSock->fd);
+	//hsocket_set_keepalive(IocpSock->fd);
 
 	int nSize = sizeof(IocpSock->peer_addr);
 	getpeername(fd, (struct sockaddr*)&IocpSock->peer_addr, &nSize);
@@ -785,9 +789,9 @@ static int Hsocket_upto_SSL_Client(HSOCKET IocpSock) {
 #endif
 
 static int do_connect(HSOCKET IocpSock) {
-	hsocket_set_keepalive(IocpSock->fd);
 	setsockopt(IocpSock->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);  //连接成功后刷新套接字属性
 	SetFileCompletionNotificationModes((HANDLE)IocpSock->fd, FILE_SKIP_SET_EVENT_ON_HANDLE | FILE_SKIP_COMPLETION_PORT_ON_SUCCESS);
+	//hsocket_set_keepalive(IocpSock->fd);
 #ifdef OPENSSL_SUPPORT
 	if (IocpSock->protocol == SSL_PROTOCOL) {
 		return Hsocket_upto_SSL_Client(IocpSock);
@@ -1119,22 +1123,28 @@ void __STDCALL PostSignal(BaseWorker* worker, long long signal, Signal_Callback 
 	}
 }
 
-static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, int listen_port)
+static bool IOCPConnectUDP(BaseWorker* worker, HSOCKET IocpSock, const char* bind_ip, int bind_port)
 {
 	SOCKET fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (fd == INVALID_SOCKET) return false;
 	IocpSock->fd = fd;
 
-	struct sockaddr_in6 local_addr;
-	memset(&local_addr, 0, sizeof(local_addr));
-	local_addr.sin6_family = AF_INET6;
-	local_addr.sin6_port = ntohs(listen_port);
-	local_addr.sin6_addr = in6addr_any;
 	socket_set_v6only(fd, 0);
-
 	u_long nonblock = 1;
 	ioctlsocket(fd, FIONBIO, &nonblock);
 	set_linger_for_fd(fd);
+
+	struct sockaddr_in6 local_addr;
+	memset(&local_addr, 0, sizeof(local_addr));
+	local_addr.sin6_family = AF_INET6;
+	if (bind_ip) {
+		char v6ip[40] = { 0x0 };
+		const char* dst = socket_ip_v4_converto_v6(bind_ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, dst, &local_addr.sin6_addr);
+	}
+	if (bind_port > 0) {
+		local_addr.sin6_port = htons(bind_port);
+	}
 	if (bind(fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
@@ -1178,7 +1188,7 @@ HSOCKET __STDCALL HsocketListenUDP(BaseWorker* worker, const char* ip, int port)
 	inet_pton(AF_INET6, dst, &IocpSock->peer_addr.sin6_addr);
 
 	bool ret = false;
-	ret = IOCPConnectUDP(worker, IocpSock, port);   //UDP连接
+	ret = IOCPConnectUDP(worker, IocpSock, NULL, port);   //UDP连接
 	if (ret == false){
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
@@ -1187,22 +1197,31 @@ HSOCKET __STDCALL HsocketListenUDP(BaseWorker* worker, const char* ip, int port)
 	return 0;
 }
 
-static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock){
+static bool IOCPConnectTCP(BaseWorker* worker, HSOCKET IocpSock, const char* bind_ip, int bind_port){
 	SOCKET fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if (fd == INVALID_SOCKET) return false;
 	IocpSock->fd = fd;
 
-	struct sockaddr_in6 local_addr;
-	memset(&local_addr, 0, sizeof(local_addr));
-	local_addr.sin6_family = AF_INET6;
 	socket_set_v6only(fd, 0);
-
 	u_long nonblock = 1;
 	ioctlsocket(fd, FIONBIO, &nonblock);
 	set_linger_for_fd(fd);
+
+	struct sockaddr_in6 local_addr;
+	memset(&local_addr, 0, sizeof(local_addr));
+	local_addr.sin6_family = AF_INET6;
+	if (bind_ip) {
+		char v6ip[40] = { 0x0 };
+		const char* dst = socket_ip_v4_converto_v6(bind_ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, dst, &local_addr.sin6_addr);
+	}
+	if (bind_port > 0) {
+		local_addr.sin6_port = htons(bind_port);
+	}
 	if (bind(fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
 		return false;
 	}
+
 	ThreadStat* ts = ThreadDistribution(worker);
 	CreateIoCompletionPort((HANDLE)fd, ts->CompletionPort, (ULONG_PTR)IocpSock, 0);
 
@@ -1244,18 +1263,66 @@ HSOCKET __STDCALL HsocketConnect(BaseWorker* worker, const char* ip, int port, P
 		|| protocol == SSL_PROTOCOL
 #endif
 		)
-		ret = IOCPConnectTCP(worker, IocpSock);   //TCP连接
+		ret = IOCPConnectTCP(worker, IocpSock, NULL, 0);   //TCP连接
 	else if (protocol == UDP_PROTOCOL
 #ifdef KCP_SUPPORT
 		|| protocol == KCP_PROTOCOL
 #endif
 		)
-		ret = IOCPConnectUDP(worker, IocpSock, 0);   //UDP连接
+		ret = IOCPConnectUDP(worker, IocpSock, NULL, 0);   //UDP连接
 	else {
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}
 	if (ret == false){
+		ReleaseIOCP_Socket(IocpSock);
+		return NULL;
+	}
+	worker->ref_count++;
+	return IocpSock;
+}
+
+HSOCKET __STDCALL HsocketBindConnect(BaseWorker* worker, const char* bind_ip, int bind_port, const char* ip, int port, PROTOCOL protocol) {
+	if (worker == NULL) return NULL;
+	HSOCKET IocpSock = NewIOCP_Socket();
+	if (IocpSock == NULL) return NULL;
+
+	char* recv_buf = (char*)malloc(DATA_BUFSIZE);
+	if (recv_buf == NULL) {
+		printf("%s:%d memory malloc error\n", __func__, __LINE__);
+		ReleaseIOCP_Socket(IocpSock);
+		return NULL;
+	}
+	IocpSock->recv_buf = recv_buf;
+	IocpSock->size = DATA_BUFSIZE;
+	IocpSock->event_type = SOCKET_CONNECT;
+	IocpSock->protocol = protocol;
+	IocpSock->worker = worker;
+	IocpSock->peer_addr.sin6_family = AF_INET6;
+	IocpSock->peer_addr.sin6_port = htons(port);
+
+	char v6ip[40] = { 0x0 };
+	const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, dst, &IocpSock->peer_addr.sin6_addr);
+
+	bool ret = false;
+	if (protocol == TCP_PROTOCOL
+#ifdef OPENSSL_SUPPORT
+		|| protocol == SSL_PROTOCOL
+#endif
+		)
+		ret = IOCPConnectTCP(worker, IocpSock, bind_ip, bind_port);   //TCP连接
+	else if (protocol == UDP_PROTOCOL
+#ifdef KCP_SUPPORT
+		|| protocol == KCP_PROTOCOL
+#endif
+		)
+		ret = IOCPConnectUDP(worker, IocpSock, bind_ip, bind_port);   //UDP连接
+	else {
+		ReleaseIOCP_Socket(IocpSock);
+		return NULL;
+	}
+	if (ret == false) {
 		ReleaseIOCP_Socket(IocpSock);
 		return NULL;
 	}

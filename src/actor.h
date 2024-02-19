@@ -114,6 +114,7 @@ extern "C"
 	Actor_API int		__STDCALL	AccepterStop(BaseAccepter* accepter);
 
 	Actor_API HSOCKET	__STDCALL	HsocketListenUDP(BaseWorker* worker, const char* ip, int port);
+	Actor_API HSOCKET	__STDCALL	HsocketBindConnect(BaseWorker* worker, const char* bind_ip, int bind_port, const char* ip, int port, PROTOCOL protocol);
 	Actor_API HSOCKET	__STDCALL	HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL protocol);
 	Actor_API bool		__STDCALL	HsocketSend(HSOCKET hsock, const char* data, int len);
 	Actor_API bool		__STDCALL	HsocketSendTo(HSOCKET hsock, const char* ip, int port, const char* data, int len);

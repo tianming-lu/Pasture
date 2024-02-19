@@ -65,7 +65,7 @@ ThreadStat* ThreadDistribution(BaseWorker* worker) {
 	ThreadStat* tsa, * tsb;
 	thread_id = 0;
 	tsa = THREAD_STATES_AT(0);
-	for (int i = 1; i <= ActorThreadWorker; i++) {
+	for (int i = 1; i < ActorThreadWorker; i++) {
 		tsb = THREAD_STATES_AT(i);
 		tsb = THREAD_STATES_AT(i);
 		if (tsb->WorkerCount < tsa->WorkerCount) {
@@ -978,19 +978,25 @@ int AccepterStop(BaseAccepter* accepter){
 	return 0;
 }
 
-static bool EpollConnectExUDP(BaseWorker* worker, HSOCKET hsock, int listen_port){
+static bool EpollConnectExUDP(BaseWorker* worker, HSOCKET hsock, const char* bind_ip, int bind_port){
 	int fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if(fd < 0) {
 		return false;
 	}
 	
+	socket_set_v6only(hsock->fd, 0);
+
 	struct sockaddr_in6 local_addr;
 	memset(&local_addr, 0, sizeof(local_addr));
 	local_addr.sin6_family = AF_INET6;
-	local_addr.sin6_port = htons(listen_port);
-	local_addr.sin6_addr = in6addr_any;
-	socket_set_v6only(hsock->fd, 0);
-
+	if (bind_ip) {
+		char v6ip[40] = { 0x0 };
+		const char* dst = socket_ip_v4_converto_v6(bind_ip, v6ip, sizeof(v6ip));
+		inet_pton(AF_INET6, dst, &local_addr.sin6_addr);
+	}
+	if (bind_port > 0) {
+		local_addr.sin6_port = htons(bind_port);
+	}
 	if(bind(fd, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
 		close(fd);
 		return false;
@@ -1024,7 +1030,7 @@ HSOCKET HsocketListenUDP(BaseWorker* worker, const char* ip, int port){
 	hsock->epoll_fd = ts->epoll_fd;
 
 	bool ret = false;
-	ret =  EpollConnectExUDP(worker, hsock, port);
+	ret =  EpollConnectExUDP(worker, hsock, NULL, port);
 	if (ret == false) {
 		release_hsock(hsock);
 		return NULL;
@@ -1033,7 +1039,7 @@ HSOCKET HsocketListenUDP(BaseWorker* worker, const char* ip, int port){
 	return hsock;
 }
 
-static bool EpollConnectExTCP(BaseWorker* worker, HSOCKET hsock){
+static bool EpollConnectExTCP(BaseWorker* worker, HSOCKET hsock, const char* bind_ip, int bind_port){
 	int fd = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if(fd < 0) {
 		return false;
@@ -1043,6 +1049,23 @@ static bool EpollConnectExTCP(BaseWorker* worker, HSOCKET hsock){
 	set_linger_for_fd(fd);
 	fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0)|O_NONBLOCK);
 	socket_set_v6only(hsock->fd, 0);
+	
+	if (bind_ip || bind_port){
+		struct sockaddr_in6 local_addr;
+		memset(&local_addr, 0, sizeof(local_addr));
+		local_addr.sin6_family = AF_INET6;
+		if (bind_ip) {
+			char v6ip[40] = { 0x0 };
+			const char* dst = socket_ip_v4_converto_v6(bind_ip, v6ip, sizeof(v6ip));
+			inet_pton(AF_INET6, dst, &local_addr.sin6_addr);
+		}
+		if (bind_port > 0) {
+			local_addr.sin6_port = htons(bind_port);
+		}
+		if (bind(fd, (struct sockaddr*)(&local_addr), sizeof(local_addr))) {
+			return false;
+		}
+	}
 	
 	connect(fd, (struct sockaddr*)&hsock->peer_addr, sizeof(hsock->peer_addr));
 	hsock->_conn_stat = SOCKET_CONNECTING;
@@ -1074,13 +1097,52 @@ HSOCKET HsocketConnect(BaseWorker* worker, const char* ip, int port, PROTOCOL pr
 	bool ret = false;
 	protocol = protocol;
 	if (protocol == UDP_PROTOCOL)
-		ret =  EpollConnectExUDP(worker, hsock, 0);
+		ret =  EpollConnectExUDP(worker, hsock, NULL, 0);
 	else if (protocol == TCP_PROTOCOL
 #ifdef OPENSSL_SUPPORT
 		|| protocol == SSL_PROTOCOL
 #endif
 		)
-		ret = EpollConnectExTCP(worker, hsock);
+		ret = EpollConnectExTCP(worker, hsock, NULL, 0);
+	if (ret == false) {
+		release_hsock(hsock);
+		return NULL;
+	}
+	worker->ref_count++;
+	return hsock;
+}
+
+HSOCKET HsocketBindConnect(BaseWorker* worker, const char* bind_ip, int bind_port, const char* ip, int port, PROTOCOL protocol){
+	if (worker == NULL) 
+		return NULL;
+	HSOCKET hsock = new_hsockt();
+	if (hsock == NULL) 
+		return NULL;
+	if (!buff_ctx_init(hsock)){
+		release_hsock(hsock);
+		return NULL;
+	}
+	hsock->peer_addr.sin6_family = AF_INET6;
+	hsock->peer_addr.sin6_port = htons(port);
+	char v6ip[40] = { 0x0 };
+	const char* dst = socket_ip_v4_converto_v6(ip, v6ip, sizeof(v6ip));
+	inet_pton(AF_INET6, dst, &hsock->peer_addr.sin6_addr);
+
+	hsock->protocol = protocol;
+	hsock->worker = worker;
+	ThreadStat* ts = ThreadDistribution(worker);
+	hsock->epoll_fd = ts->epoll_fd;
+
+	bool ret = false;
+	protocol = protocol;
+	if (protocol == UDP_PROTOCOL)
+		ret =  EpollConnectExUDP(worker, hsock, bind_ip, bind_port);
+	else if (protocol == TCP_PROTOCOL
+#ifdef OPENSSL_SUPPORT
+		|| protocol == SSL_PROTOCOL
+#endif
+		)
+		ret = EpollConnectExTCP(worker, hsock, bind_ip, bind_port);
 	if (ret == false) {
 		release_hsock(hsock);
 		return NULL;
